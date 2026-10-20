@@ -66,6 +66,9 @@ export async function testSheetConnection(sheetId: string) {
   return response.data;
 }
 
+// In-memory cache for sheet numeric IDs to make realtime updates lightning fast
+const tabNumericIdCache = new Map<string, number>();
+
 /**
  * Ensure sheet tab exists with headers starting at B4 and stylish formatting.
  * If default "Sheet1" is empty, it can be renamed to the desired tabName.
@@ -75,6 +78,11 @@ export async function ensureSheetTab(
   tabName: string,
   headers: string[] = DEFAULT_HEADERS
 ): Promise<{ sheetNumericId: number; createdOrRenamed: boolean }> {
+  const cacheKey = `${sheetId}:${tabName}`;
+  if (tabNumericIdCache.has(cacheKey)) {
+    return { sheetNumericId: tabNumericIdCache.get(cacheKey)!, createdOrRenamed: false };
+  }
+
   const auth = getAuthClient();
   const sheets = google.sheets({ version: 'v4', auth });
 
@@ -169,6 +177,7 @@ export async function ensureSheetTab(
     await applyHeaderStyles(sheetId, sheetNumericId, headers.length);
   }
 
+  tabNumericIdCache.set(cacheKey, sheetNumericId);
   return { sheetNumericId, createdOrRenamed: isNew };
 }
 
@@ -652,8 +661,7 @@ export async function updateOrAppendAttendanceInSheet(
       },
     });
 
-    // Reapply style on this row
-    await applyDataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1, DEFAULT_HEADERS.length);
+    // In-place update preserves cell borders and styles automatically
     return { action: 'updated', rowNumber: foundRowNumber, tabName };
   } else {
     // Student not pre-populated in the sheet -> append as new row at the bottom
@@ -775,27 +783,27 @@ export async function syncCategorizedWithMasterRoster(
     groups['Dosen'] = dosenList;
   }
 
-  // 3. Write each tab starting at B5
-  const results: { tabName: string; count: number }[] = [];
+  // 3. Write each tab starting at B5 concurrently for maximum speed
+  const results = await Promise.all(
+    Object.entries(groups).map(async ([tabName, items]) => {
+      // Sort by NIM
+      items.sort((a, b) => String(a.nim).localeCompare(String(b.nim)));
 
-  for (const [tabName, items] of Object.entries(groups)) {
-    // Sort by NIM
-    items.sort((a, b) => String(a.nim).localeCompare(String(b.nim)));
+      const rows = items.map((item) => [
+        item.check_in_time,
+        item.attendance_date,
+        item.nim,
+        item.name,
+        normalizeAngkatan(item.class_name),
+        item.status,
+        item.notes,
+        item.synced_at,
+      ]);
 
-    const rows = items.map((item) => [
-      item.check_in_time,
-      item.attendance_date,
-      item.nim,
-      item.name,
-      normalizeAngkatan(item.class_name),
-      item.status,
-      item.notes,
-      item.synced_at,
-    ]);
-
-    await clearAndRewriteTab(sheetId, tabName, rows);
-    results.push({ tabName, count: rows.length });
-  }
+      await clearAndRewriteTab(sheetId, tabName, rows);
+      return { tabName, count: rows.length };
+    })
+  );
 
   return results;
 }

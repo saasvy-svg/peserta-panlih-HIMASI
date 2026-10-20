@@ -19,6 +19,7 @@ import {
   BookOpen
 } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
+import { createClient } from '@/utils/supabase/client';
 
 interface AttendanceFormProps {
   lecturers?: string[];
@@ -148,6 +149,26 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
       if (res.ok) {
         setSubmitError(null);
         toast.success('Presensi peserta berhasil dicatat!');
+
+        // Broadcast instan 0-detik ke dashboard admin
+        try {
+          const supabase = createClient();
+          const channel = supabase.channel('himasi-live-sync');
+          channel.subscribe((subStatus) => {
+            if (subStatus === 'SUBSCRIBED') {
+              channel.send({
+                type: 'broadcast',
+                event: 'attendance_checkin',
+                payload: {
+                  name: student.name,
+                  nim: student.nim || nim.trim(),
+                  class_name: student.class_name,
+                  status,
+                },
+              });
+            }
+          });
+        } catch (e) {}
         setSuccessReceipt({
           role: 'peserta',
           nim: student.nim || nim.trim(),
@@ -203,6 +224,26 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
 
       if (res.ok) {
         toast.success(`Presensi ${selectedLecturer} berhasil dicatat!`);
+
+        // Broadcast instan 0-detik ke dashboard admin
+        try {
+          const supabase = createClient();
+          const channel = supabase.channel('himasi-live-sync');
+          channel.subscribe((subStatus) => {
+            if (subStatus === 'SUBSCRIBED') {
+              channel.send({
+                type: 'broadcast',
+                event: 'attendance_checkin',
+                payload: {
+                  name: selectedLecturer,
+                  nim: finalNip,
+                  class_name: lecturerRole || 'Dosen',
+                  status,
+                },
+              });
+            }
+          });
+        } catch (e) {}
         setSuccessReceipt({
           role: 'dosen',
           name: selectedLecturer,

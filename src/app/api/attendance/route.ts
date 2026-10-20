@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
         .eq('sheet_role', 'admin')
         .maybeSingle();
 
-      if (config && config.sheet_id && config.sync_mode === 'realtime') {
+      if (config && config.sheet_id && config.sync_mode !== 'manual_only') {
         updateOrAppendAttendanceInSheet(config.sheet_id, {
           nim,
           name,
