@@ -158,18 +158,20 @@ export async function POST(request: NextRequest) {
         .maybeSingle();
 
       if (config && config.sheet_id && config.sync_mode !== 'manual_only') {
-        updateOrAppendAttendanceInSheet(config.sheet_id, {
-          nim,
-          name,
-          class_name,
-          lecturer_name,
-          attendance_date: today,
-          check_in_time: nowTime,
-          status,
-          notes: insertPayload.notes,
-        }).catch((err) => {
-          console.error('Realtime Google Sheets update error:', err.message);
-        });
+        try {
+          await updateOrAppendAttendanceInSheet(config.sheet_id, {
+            nim,
+            name,
+            class_name,
+            lecturer_name,
+            attendance_date: today,
+            check_in_time: nowTime,
+            status,
+            notes: insertPayload.notes,
+          });
+        } catch (syncErr: any) {
+          console.error('Realtime Google Sheets update error:', syncErr?.message || syncErr);
+        }
       }
     } catch (sheetErr: any) {
       console.error('Google Sheets check error:', sheetErr.message);

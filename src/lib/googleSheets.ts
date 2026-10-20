@@ -590,6 +590,58 @@ export async function appendRows(sheetId: string, tabName: string, rows: any[][]
 }
 
 /**
+ * Finds the best matching tab title in the spreadsheet (handling variations like "Angkatan 25" vs "Angkatan 2025").
+ */
+export async function getExistingTabTitle(sheetId: string, requestedTabName: string): Promise<{ title: string; numericId: number }> {
+  const cacheKey = `${sheetId}:${requestedTabName}`;
+  if (tabNumericIdCache.has(cacheKey)) {
+    return { title: requestedTabName, numericId: tabNumericIdCache.get(cacheKey)! };
+  }
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
+  const allSheets = meta.data.sheets || [];
+
+  // 1. Exact match
+  let found = allSheets.find(s => s.properties?.title === requestedTabName);
+  
+  // 2. Case-insensitive match
+  if (!found) {
+    found = allSheets.find(s => s.properties?.title?.toLowerCase() === requestedTabName.toLowerCase());
+  }
+
+  // 3. Flexible Angkatan matching (e.g. "Angkatan 25" vs "Angkatan 2025")
+  if (!found && requestedTabName.toLowerCase().includes('angkatan')) {
+    const digits = requestedTabName.match(/\d+/)?.[0];
+    if (digits) {
+      const shortYear = digits.slice(-2); // "25"
+      const longYear = `20${shortYear}`; // "2025"
+      found = allSheets.find(s => {
+        const title = s.properties?.title || '';
+        return title.toLowerCase().includes('angkatan') && (title.includes(shortYear) || title.includes(longYear));
+      });
+    }
+  }
+
+  // 4. Flexible Dosen matching
+  if (!found && requestedTabName.toLowerCase().includes('dosen')) {
+    found = allSheets.find(s => s.properties?.title?.toLowerCase().includes('dosen'));
+  }
+
+  if (found && found.properties?.title) {
+    const numericId = found.properties.sheetId ?? 0;
+    tabNumericIdCache.set(cacheKey, numericId);
+    return { title: found.properties.title, numericId };
+  }
+
+  // Not found in existing sheets, ensure it
+  const { sheetNumericId } = await ensureSheetTab(sheetId, requestedTabName);
+  tabNumericIdCache.set(cacheKey, sheetNumericId);
+  return { title: requestedTabName, numericId: sheetNumericId };
+}
+
+/**
  * Updates a student's row in-place if their NIM is already in the sheet (e.g. from pre-populated roster).
  * If the student is not yet in the sheet, appends a new row at the bottom.
  */
@@ -606,30 +658,30 @@ export async function updateOrAppendAttendanceInSheet(
     notes?: string | null;
   }
 ) {
-  const tabName = getTargetTabName(record);
-  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
+  const requestedTabName = getTargetTabName(record);
+  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(sheetId, requestedTabName);
 
   const auth = getAuthClient();
   const sheets = google.sheets({ version: 'v4', auth });
 
-  // 1. Fetch column E (NIM) and column F (Nama) from row 4 downwards to find if student/dosen is already in the sheet
+  // 1. Fetch column E (NIM) and column F (Nama) from row 1 to bottom
   const colEF = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${tabName}!E4:F`,
+    range: `'${tabName}'!E:F`,
   });
 
   const rowValues = colEF.data.values || [];
   const targetNim = String(record.nim || '').trim().toUpperCase();
   const targetName = String(record.name || '').trim().toUpperCase();
 
-  // Row 4 is header (index 0). Index 1 is row 5, index 2 is row 6, etc.
+  // Index 0 = Row 1. Row 4 is header, row 5 is index 4.
   let foundRowNumber = -1;
-  for (let i = 1; i < rowValues.length; i++) {
+  for (let i = 0; i < rowValues.length; i++) {
     const rowNim = String(rowValues[i]?.[0] || '').trim().toUpperCase();
     const rowName = String(rowValues[i]?.[1] || '').trim().toUpperCase();
 
     if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
-      foundRowNumber = 4 + i;
+      foundRowNumber = i + 1; // Exactly row number in Google Sheets!
       break;
     }
   }
@@ -654,7 +706,7 @@ export async function updateOrAppendAttendanceInSheet(
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
-      range: `${tabName}!C${foundRowNumber}:J${foundRowNumber}`,
+      range: `'${tabName}'!C${foundRowNumber}:J${foundRowNumber}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [updateValues],
