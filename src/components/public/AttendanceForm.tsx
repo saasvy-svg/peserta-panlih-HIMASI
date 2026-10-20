@@ -127,6 +127,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
       return;
     }
 
+    setSubmitError(null);
     setIsSubmitting(true);
     try {
       const res = await fetch('/api/attendance', {
@@ -182,6 +183,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
 
     const finalNip = lecturerNip.trim() || `DOSEN-${selectedLecturer.replace(/[^a-zA-Z0-9]/g, '').slice(0, 15)}`;
 
+    setSubmitError(null);
     setIsSubmitting(true);
     try {
       const res = await fetch('/api/attendance', {

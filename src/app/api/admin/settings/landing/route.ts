@@ -23,6 +23,7 @@ export async function GET() {
         'Jika berhalangan, pilih opsi Izin atau Sakit dan cantumkan alasan yang jelas.',
       ],
       lecturers: [],
+      anti_titip_enabled: true,
       card1_title: 'Waktu Presensi',
       card1_desc: '07.00 - 17.00 WIB',
       card2_title: 'Presisi NIM',

@@ -28,6 +28,7 @@ export interface ExtraTexts {
   instruction_title?: string;
   instructions?: string[];
   lecturers?: string[];
+  anti_titip_enabled?: boolean;
   card1_title?: string;
   card1_desc?: string;
   card2_title?: string;

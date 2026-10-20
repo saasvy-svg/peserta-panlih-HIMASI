@@ -70,9 +70,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Proteksi Anti-Titip Absen: 1 IP / Perangkat hanya bisa absen 1 kali per hari
-    // Bypassed jika diabsenkan langsung oleh Admin (admin_override = true) atau untuk Dosen
-    if (!isAdminOverride && !nim.startsWith('DOSEN')) {
+    // 2. Proteksi Anti-Titip Absen: Cek saklar pengaturan
+    let isAntiTitipEnabled = true;
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
+
+      if (landingData?.extra_texts && typeof landingData.extra_texts.anti_titip_enabled === 'boolean') {
+        isAntiTitipEnabled = landingData.extra_texts.anti_titip_enabled;
+      }
+    } catch (e) {}
+
+    // Bypassed jika saklar dinonaktifkan, atau diabsenkan langsung oleh Admin, atau untuk Dosen
+    if (isAntiTitipEnabled && !isAdminOverride && !nim.startsWith('DOSEN')) {
       const isLocalIp = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === 'localhost';
       if (!isLocalIp) {
         const { data: duplicateDevice } = await supabase
