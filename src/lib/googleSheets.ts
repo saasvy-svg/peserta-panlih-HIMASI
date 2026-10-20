@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
+import { getWIBDate, getWIBTime, getWIBLocaleString } from '@/lib/utils';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
@@ -686,9 +687,10 @@ export async function updateOrAppendAttendanceInSheet(
     }
   }
 
-  const rawTime = record.check_in_time || new Date().toTimeString().split(' ')[0];
+  const rawTime = record.check_in_time || getWIBTime();
   const formattedTime = (rawTime.length > 5 ? rawTime.slice(0, 5) : rawTime) + ' WIB';
-  const formattedDate = record.attendance_date || new Date().toISOString().split('T')[0];
+  const formattedDate = record.attendance_date || getWIBDate();
+  const tercatatWIB = getWIBLocaleString();
 
   if (foundRowNumber !== -1) {
     // IN-PLACE UPDATE on existing student row! (Columns C to J)
@@ -701,7 +703,7 @@ export async function updateOrAppendAttendanceInSheet(
       normalizeAngkatan(record.class_name),
       record.status || 'Hadir',
       record.notes || '-',
-      new Date().toLocaleString('id-ID'),
+      tercatatWIB,
     ];
 
     await sheets.spreadsheets.values.update({
@@ -725,7 +727,7 @@ export async function updateOrAppendAttendanceInSheet(
       normalizeAngkatan(record.class_name),
       record.status || 'Hadir',
       record.notes || '-',
-      new Date().toLocaleString('id-ID'),
+      tercatatWIB,
     ];
 
     await appendRowToTab(sheetId, tabName, newRow);
@@ -770,7 +772,7 @@ export async function syncCategorizedWithMasterRoster(
       check_in_time: existingAtt?.check_in_time ? existingAtt.check_in_time.slice(0, 5) + ' WIB' : '-',
       status: existingAtt?.status || 'Belum Hadir',
       notes: existingAtt?.notes || '-',
-      synced_at: existingAtt ? new Date(existingAtt.created_at || Date.now()).toLocaleString('id-ID') : '-',
+      synced_at: existingAtt ? new Date(existingAtt.created_at || Date.now()).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) + ' WIB' : '-',
     });
   }
 
@@ -806,7 +808,7 @@ export async function syncCategorizedWithMasterRoster(
       check_in_time: att?.check_in_time ? att.check_in_time.slice(0, 5) + ' WIB' : '-',
       status: att?.status || 'Belum Hadir',
       notes: att?.notes || '-',
-      synced_at: att ? new Date(att.created_at || Date.now()).toLocaleString('id-ID') : '-',
+      synced_at: att ? new Date(att.created_at || Date.now()).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) + ' WIB' : '-',
     });
   }
 
@@ -826,7 +828,7 @@ export async function syncCategorizedWithMasterRoster(
         check_in_time: att.check_in_time ? att.check_in_time.slice(0, 5) + ' WIB' : '-',
         status: att.status || 'Hadir',
         notes: att.notes || '-',
-        synced_at: new Date(att.created_at || Date.now()).toLocaleString('id-ID'),
+        synced_at: new Date(att.created_at || Date.now()).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }) + ' WIB',
       });
     }
   }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/utils/supabase/admin';
 import { updateOrAppendAttendanceInSheet } from '@/lib/googleSheets';
 import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
+import { getWIBDate, getWIBTime } from '@/lib/utils';
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for');
@@ -41,8 +42,8 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createAdminClient();
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toTimeString().split(' ')[0]; // HH:MM:SS
+    const today = getWIBDate();
+    const nowTime = getWIBTime(); // HH:MM:SS format WIB (Asia/Jakarta)
     const clientIp = getClientIp(request);
     const isAdminOverride = Boolean(admin_override);
 
