@@ -1,0 +1,843 @@
+import { google } from 'googleapis';
+import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
+
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+
+export const DEFAULT_HEADERS = [
+  'No',
+  'Waktu Masuk',
+  'Tanggal Presensi',
+  'NIM / NIP',
+  'Nama Lengkap',
+  'Angkatan',
+  'Status Presensi',
+  'Catatan / Alasan',
+  'Tercatat Pada',
+];
+
+/**
+ * Extracts pure Sheet ID from a full Google Sheets URL or raw ID
+ */
+export function extractSheetId(input: string): string {
+  if (!input) return '';
+  const trimmed = input.trim();
+  if (trimmed.includes('/d/')) {
+    const matches = trimmed.match(/\/d\/([a-zA-Z0-9-_]+)/);
+    if (matches && matches[1]) {
+      return matches[1];
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Parses the service account JSON key from the environment variable.
+ */
+export function getAuthClient() {
+  const keyString = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!keyString) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY environment variable belum dikonfigurasi.');
+  }
+
+  try {
+    const credentials = JSON.parse(keyString);
+    if (credentials.private_key) {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    }
+
+    return new google.auth.GoogleAuth({
+      credentials,
+      scopes: SCOPES,
+    });
+  } catch (err: any) {
+    throw new Error('Gagal memproses GOOGLE_SERVICE_ACCOUNT_KEY. Pastikan format JSON valid.');
+  }
+}
+
+/**
+ * Test sheet connection
+ */
+export async function testSheetConnection(sheetId: string) {
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const response = await sheets.spreadsheets.get({
+    spreadsheetId: sheetId,
+  });
+  return response.data;
+}
+
+/**
+ * Ensure sheet tab exists with headers starting at B4 and stylish formatting.
+ * If default "Sheet1" is empty, it can be renamed to the desired tabName.
+ */
+export async function ensureSheetTab(
+  sheetId: string,
+  tabName: string,
+  headers: string[] = DEFAULT_HEADERS
+): Promise<{ sheetNumericId: number; createdOrRenamed: boolean }> {
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
+  const allSheets = meta.data.sheets || [];
+  let existingSheet = allSheets.find((s) => s.properties?.title === tabName);
+  let sheetNumericId = existingSheet?.properties?.sheetId ?? 0;
+  let isNew = false;
+
+  if (!existingSheet) {
+    // Check if there is an untouched "Sheet1" that can be renamed
+    const sheet1 = allSheets.find((s) => s.properties?.title === 'Sheet1');
+    if (sheet1 && allSheets.length === 1) {
+      // Check if Sheet1 is empty
+      const checkData = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: 'Sheet1!A1:Z10',
+      });
+      const hasValues = checkData.data.values && checkData.data.values.length > 0;
+
+      if (!hasValues) {
+        // Rename Sheet1 to tabName
+        sheetNumericId = sheet1.properties?.sheetId ?? 0;
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: sheetId,
+          requestBody: {
+            requests: [
+              {
+                updateSheetProperties: {
+                  properties: {
+                    sheetId: sheetNumericId,
+                    title: tabName,
+                  },
+                  fields: 'title',
+                },
+              },
+            ],
+          },
+        });
+        isNew = true;
+      }
+    }
+
+    if (!isNew) {
+      // Add a new tab
+      const addRes = await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: { title: tabName },
+              },
+            },
+          ],
+        },
+      });
+
+      sheetNumericId =
+        addRes.data.replies?.[0]?.addSheet?.properties?.sheetId ?? Date.now();
+      isNew = true;
+    }
+  }
+
+  // Check if header already exists at B4
+  const headerCheck = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${tabName}!B4:J4`,
+  });
+
+  const headersPresent =
+    headerCheck.data.values &&
+    headerCheck.data.values.length > 0 &&
+    headerCheck.data.values[0][0] === headers[0];
+
+  if (!headersPresent) {
+    // 1. Write Title Banner (B2:B3) and Column Headers (B4:J4)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tabName}!B2:J4`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [
+          [`REKAP PRESENSI - ${tabName.toUpperCase()}`],
+          [`Diperbarui otomatis oleh Sistem Absensi • Terkoneksi Realtime`],
+          headers,
+        ],
+      },
+    });
+
+    // 2. Apply styling (freeze row 4, dark blue header format, fonts, banner format)
+    await applyHeaderStyles(sheetId, sheetNumericId, headers.length);
+  }
+
+  return { sheetNumericId, createdOrRenamed: isNew };
+}
+
+/**
+ * Apply neat styles to headers and title banner
+ */
+export async function applyHeaderStyles(
+  sheetId: string,
+  sheetNumericId: number,
+  columnCount: number = 9
+) {
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const endColumnIndex = 1 + columnCount; // Column B is index 1
+
+  const requests: any[] = [
+    // 1. Freeze top 4 rows
+    {
+      updateSheetProperties: {
+        properties: {
+          sheetId: sheetNumericId,
+          gridProperties: {
+            frozenRowCount: 4,
+          },
+        },
+        fields: 'gridProperties.frozenRowCount',
+      },
+    },
+
+    // 2. Format Title Banner at B2
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex: 1, // row 2 (0-indexed)
+          endRowIndex: 2,
+          startColumnIndex: 1,
+          endColumnIndex: 6,
+        },
+        cell: {
+          userEnteredFormat: {
+            textFormat: {
+              bold: true,
+              fontSize: 13,
+              foregroundColor: { red: 0.12, green: 0.23, blue: 0.54 }, // Navy #1E3A8A
+            },
+          },
+        },
+        fields: 'userEnteredFormat.textFormat',
+      },
+    },
+
+    // 3. Format Subtitle at B3
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex: 2, // row 3
+          endRowIndex: 3,
+          startColumnIndex: 1,
+          endColumnIndex: 6,
+        },
+        cell: {
+          userEnteredFormat: {
+            textFormat: {
+              italic: true,
+              fontSize: 9,
+              foregroundColor: { red: 0.39, green: 0.45, blue: 0.55 }, // Gray #64748B
+            },
+          },
+        },
+        fields: 'userEnteredFormat.textFormat',
+      },
+    },
+
+    // 4. Format Table Header at B4 (Row 4)
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex: 3, // row 4
+          endRowIndex: 4,
+          startColumnIndex: 1,
+          endColumnIndex: endColumnIndex,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.12, green: 0.16, blue: 0.24 }, // Dark Slate #1E293B
+            textFormat: {
+              foregroundColor: { red: 1, green: 1, blue: 1 },
+              bold: true,
+              fontSize: 10,
+            },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+            wrapStrategy: 'WRAP',
+          },
+        },
+        fields:
+          'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
+      },
+    },
+
+    // 5. Header Borders
+    {
+      updateBorders: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex: 3,
+          endRowIndex: 4,
+          startColumnIndex: 1,
+          endColumnIndex: endColumnIndex,
+        },
+        top: { style: 'SOLID', color: { red: 0.12, green: 0.16, blue: 0.24 } },
+        bottom: { style: 'SOLID_MEDIUM', color: { red: 0.12, green: 0.16, blue: 0.24 } },
+        left: { style: 'SOLID', color: { red: 0.12, green: 0.16, blue: 0.24 } },
+        right: { style: 'SOLID', color: { red: 0.12, green: 0.16, blue: 0.24 } },
+        innerVertical: { style: 'SOLID', color: { red: 0.3, green: 0.35, blue: 0.45 } },
+      },
+    },
+
+    // 6. Set Header Row Height (36px)
+    {
+      updateDimensionProperties: {
+        range: {
+          sheetId: sheetNumericId,
+          dimension: 'ROWS',
+          startIndex: 3,
+          endIndex: 4,
+        },
+        properties: {
+          pixelSize: 36,
+        },
+        fields: 'pixelSize',
+      },
+    },
+
+    // 7. Auto Resize Columns (B to end)
+    {
+      autoResizeDimensions: {
+        dimensions: {
+          sheetId: sheetNumericId,
+          dimension: 'COLUMNS',
+          startIndex: 1,
+          endIndex: endColumnIndex,
+        },
+      },
+    },
+  ];
+
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { requests },
+    });
+  } catch (err: any) {
+    console.error('Failed applying header styles:', err.message);
+  }
+}
+
+/**
+ * Format data rows with borders, middle vertical alignment, and proper column alignment.
+ */
+export async function applyDataRowStyles(
+  sheetId: string,
+  sheetNumericId: number,
+  startRow: number, // 1-indexed (e.g. 5)
+  totalRows: number,
+  columnCount: number = 9
+) {
+  if (totalRows <= 0) return;
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const startRowIndex = startRow - 1; // 0-indexed
+  const endRowIndex = startRowIndex + totalRows;
+  const endColumnIndex = 1 + columnCount;
+
+  const requests: any[] = [
+    // 1. Thin borders around and inside data cells
+    {
+      updateBorders: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: 1,
+          endColumnIndex,
+        },
+        top: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
+        bottom: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
+        left: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
+        right: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
+        innerHorizontal: { style: 'SOLID', color: { red: 0.9, green: 0.92, blue: 0.95 } },
+        innerVertical: { style: 'SOLID', color: { red: 0.9, green: 0.92, blue: 0.95 } },
+      },
+    },
+
+    // 2. Base alignment & font for data cells
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: 1,
+          endColumnIndex,
+        },
+        cell: {
+          userEnteredFormat: {
+            verticalAlignment: 'MIDDLE',
+            textFormat: {
+              fontSize: 10,
+              foregroundColor: { red: 0.1, green: 0.12, blue: 0.15 },
+            },
+          },
+        },
+        fields: 'userEnteredFormat(verticalAlignment,textFormat.fontSize,textFormat.foregroundColor)',
+      },
+    },
+
+    // 3. Center alignment for No (Col B), Jam (Col C), Tanggal (Col D), NIM (Col E), Angkatan (Col G), Status (Col H), Waktu (Col J)
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: 1, // Col B (No)
+          endColumnIndex: 5, // Col E (NIM)
+        },
+        cell: {
+          userEnteredFormat: {
+            horizontalAlignment: 'CENTER',
+          },
+        },
+        fields: 'userEnteredFormat.horizontalAlignment',
+      },
+    },
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: 6, // Col G (Angkatan)
+          endColumnIndex: 8, // Col H (Status)
+        },
+        cell: {
+          userEnteredFormat: {
+            horizontalAlignment: 'CENTER',
+            textFormat: {
+              bold: true,
+            },
+          },
+        },
+        fields: 'userEnteredFormat(horizontalAlignment,textFormat.bold)',
+      },
+    },
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex,
+          endRowIndex,
+          startColumnIndex: 9, // Col J (Waktu Sinkron)
+          endColumnIndex: 10,
+        },
+        cell: {
+          userEnteredFormat: {
+            horizontalAlignment: 'CENTER',
+            textFormat: {
+              fontSize: 9,
+              foregroundColor: { red: 0.45, green: 0.5, blue: 0.58 },
+            },
+          },
+        },
+        fields: 'userEnteredFormat(horizontalAlignment,textFormat)',
+      },
+    },
+
+    // 4. Set comfortable row heights (28px)
+    {
+      updateDimensionProperties: {
+        range: {
+          sheetId: sheetNumericId,
+          dimension: 'ROWS',
+          startIndex: startRowIndex,
+          endIndex: endRowIndex,
+        },
+        properties: {
+          pixelSize: 28,
+        },
+        fields: 'pixelSize',
+      },
+    },
+
+    // 5. Auto resize columns to fit text
+    {
+      autoResizeDimensions: {
+        dimensions: {
+          sheetId: sheetNumericId,
+          dimension: 'COLUMNS',
+          startIndex: 1,
+          endIndex: endColumnIndex,
+        },
+      },
+    },
+  ];
+
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { requests },
+    });
+  } catch (err: any) {
+    console.error('Failed applying data row styles:', err.message);
+  }
+}
+
+/**
+ * Appends a single row to a target tab starting at column B, after the last filled row.
+ */
+export async function appendRowToTab(sheetId: string, tabName: string, rowValues: any[]) {
+  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  // Find the last row in Column B
+  const colBData = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${tabName}!B4:B`,
+  });
+
+  const existingCount = colBData.data.values?.length || 1; // Row 4 is header, so existingCount=1 means table has header only
+  const nextRowNum = 4 + existingCount; // e.g. 4 + 1 = 5 (starts at B5)
+  const nextNo = existingCount; // 1, 2, 3...
+
+  // Prepend number if not supplied
+  const fullRow = [nextNo, ...rowValues];
+
+  // Write row starting at B[nextRowNum]
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `${tabName}!B${nextRowNum}:J${nextRowNum}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [fullRow],
+    },
+  });
+
+  // Apply neat styles for this newly appended row
+  await applyDataRowStyles(sheetId, sheetNumericId, nextRowNum, 1, fullRow.length);
+}
+
+/**
+ * Clears data starting from B5 downwards and rewrites neat table.
+ */
+export async function clearAndRewriteTab(
+  sheetId: string,
+  tabName: string,
+  dataRows: any[][]
+) {
+  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  // Clear from B5 downwards
+  try {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: sheetId,
+      range: `${tabName}!B5:Z1000`,
+    });
+  } catch (e: any) {
+    // Ignore clear errors
+  }
+
+  if (!dataRows || dataRows.length === 0) return;
+
+  // Add numbering to first column
+  const numberedRows = dataRows.map((row, idx) => [idx + 1, ...row]);
+
+  const endRowNum = 4 + numberedRows.length;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `${tabName}!B5:J${endRowNum}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: numberedRows,
+    },
+  });
+
+  // Apply neat styles
+  await applyDataRowStyles(sheetId, sheetNumericId, 5, numberedRows.length, DEFAULT_HEADERS.length);
+}
+
+/**
+ * Backwards compatibility wrapper for appendRows
+ */
+export async function appendRows(sheetId: string, tabName: string, rows: any[][]) {
+  if (!rows || rows.length === 0) return;
+  for (const row of rows) {
+    await appendRowToTab(sheetId, tabName, row);
+  }
+}
+
+/**
+ * Updates a student's row in-place if their NIM is already in the sheet (e.g. from pre-populated roster).
+ * If the student is not yet in the sheet, appends a new row at the bottom.
+ */
+export async function updateOrAppendAttendanceInSheet(
+  sheetId: string,
+  record: {
+    nim: string;
+    name: string;
+    class_name: string;
+    lecturer_name?: string | null;
+    attendance_date?: string;
+    check_in_time?: string;
+    status?: string;
+    notes?: string | null;
+  }
+) {
+  const tabName = getTargetTabName(record);
+  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  // 1. Fetch column E (NIM) and column F (Nama) from row 4 downwards to find if student/dosen is already in the sheet
+  const colEF = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `${tabName}!E4:F`,
+  });
+
+  const rowValues = colEF.data.values || [];
+  const targetNim = String(record.nim || '').trim().toUpperCase();
+  const targetName = String(record.name || '').trim().toUpperCase();
+
+  // Row 4 is header (index 0). Index 1 is row 5, index 2 is row 6, etc.
+  let foundRowNumber = -1;
+  for (let i = 1; i < rowValues.length; i++) {
+    const rowNim = String(rowValues[i]?.[0] || '').trim().toUpperCase();
+    const rowName = String(rowValues[i]?.[1] || '').trim().toUpperCase();
+
+    if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
+      foundRowNumber = 4 + i;
+      break;
+    }
+  }
+
+  const rawTime = record.check_in_time || new Date().toTimeString().split(' ')[0];
+  const formattedTime = (rawTime.length > 5 ? rawTime.slice(0, 5) : rawTime) + ' WIB';
+  const formattedDate = record.attendance_date || new Date().toISOString().split('T')[0];
+
+  if (foundRowNumber !== -1) {
+    // IN-PLACE UPDATE on existing student row! (Columns C to J)
+    // C: Waktu Masuk, D: Tanggal, E: NIM, F: Nama, G: Angkatan, H: Status, I: Catatan, J: Tercatat Pada
+    const updateValues = [
+      formattedTime,
+      formattedDate,
+      record.nim,
+      record.name,
+      normalizeAngkatan(record.class_name),
+      record.status || 'Hadir',
+      record.notes || '-',
+      new Date().toLocaleString('id-ID'),
+    ];
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tabName}!C${foundRowNumber}:J${foundRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [updateValues],
+      },
+    });
+
+    // Reapply style on this row
+    await applyDataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1, DEFAULT_HEADERS.length);
+    return { action: 'updated', rowNumber: foundRowNumber, tabName };
+  } else {
+    // Student not pre-populated in the sheet -> append as new row at the bottom
+    const newRow = [
+      formattedTime,
+      formattedDate,
+      record.nim,
+      record.name,
+      normalizeAngkatan(record.class_name),
+      record.status || 'Hadir',
+      record.notes || '-',
+      new Date().toLocaleString('id-ID'),
+    ];
+
+    await appendRowToTab(sheetId, tabName, newRow);
+    return { action: 'appended', tabName };
+  }
+}
+
+/**
+ * Pre-populate or full-sync the sheet with the master roster of students:
+ * Students who haven't checked in yet will show "Belum Hadir" with "-" time.
+ * Students who have checked in will show their actual check-in time and status.
+ * Dosen attendances will be populated in the "Dosen" tab.
+ */
+export async function syncCategorizedWithMasterRoster(
+  sheetId: string,
+  allStudents: any[],
+  attendances: any[],
+  date: string,
+  lecturers: string[] = []
+) {
+  // Map existing attendances by NIM and Name
+  const attMap = new Map<string, any>();
+  for (const att of attendances) {
+    if (att.nim) attMap.set(String(att.nim).trim().toUpperCase(), att);
+    if (att.name) attMap.set(String(att.name).trim().toUpperCase(), att);
+  }
+
+  // 1. Group students by Angkatan
+  const groups: Record<string, any[]> = {};
+
+  for (const s of allStudents) {
+    const tabName = normalizeAngkatan(s.class_name);
+    if (!groups[tabName]) groups[tabName] = [];
+
+    const existingAtt = attMap.get(String(s.nim).trim().toUpperCase()) || attMap.get(String(s.name).trim().toUpperCase());
+
+    groups[tabName].push({
+      nim: s.nim,
+      name: s.name,
+      class_name: s.class_name,
+      attendance_date: date,
+      check_in_time: existingAtt?.check_in_time ? existingAtt.check_in_time.slice(0, 5) + ' WIB' : '-',
+      status: existingAtt?.status || 'Belum Hadir',
+      notes: existingAtt?.notes || '-',
+      synced_at: existingAtt ? new Date(existingAtt.created_at || Date.now()).toLocaleString('id-ID') : '-',
+    });
+  }
+
+  // 2. Pre-populate Dosen tab with all registered lecturers from master list
+  const dosenMapByName = new Map<string, any>();
+  for (const att of attendances) {
+    const isDosen =
+      att.lecturer_name ||
+      (att.nim && String(att.nim).toUpperCase().startsWith('DOSEN')) ||
+      (att.class_name && String(att.class_name).toLowerCase().includes('dosen'));
+
+    if (isDosen && att.name) {
+      dosenMapByName.set(String(att.name).trim().toUpperCase(), att);
+    }
+  }
+
+  const dosenList: any[] = [];
+  const processedDosenNames = new Set<string>();
+
+  // Pre-populate each registered lecturer
+  for (let idx = 0; idx < lecturers.length; idx++) {
+    const docName = lecturers[idx].trim();
+    processedDosenNames.add(docName.toUpperCase());
+
+    const att = dosenMapByName.get(docName.toUpperCase());
+    const docNip = att?.nim || `DOSEN-${String(idx + 1).padStart(2, '0')}`;
+
+    dosenList.push({
+      nim: docNip,
+      name: docName,
+      class_name: 'Dosen',
+      attendance_date: date,
+      check_in_time: att?.check_in_time ? att.check_in_time.slice(0, 5) + ' WIB' : '-',
+      status: att?.status || 'Belum Hadir',
+      notes: att?.notes || '-',
+      synced_at: att ? new Date(att.created_at || Date.now()).toLocaleString('id-ID') : '-',
+    });
+  }
+
+  // Include any other Dosen who attended but wasn't in master list
+  for (const att of attendances) {
+    const isDosen =
+      att.lecturer_name ||
+      (att.nim && String(att.nim).toUpperCase().startsWith('DOSEN')) ||
+      (att.class_name && String(att.class_name).toLowerCase().includes('dosen'));
+
+    if (isDosen && att.name && !processedDosenNames.has(String(att.name).trim().toUpperCase())) {
+      dosenList.push({
+        nim: att.nim,
+        name: att.name,
+        class_name: 'Dosen',
+        attendance_date: date,
+        check_in_time: att.check_in_time ? att.check_in_time.slice(0, 5) + ' WIB' : '-',
+        status: att.status || 'Hadir',
+        notes: att.notes || '-',
+        synced_at: new Date(att.created_at || Date.now()).toLocaleString('id-ID'),
+      });
+    }
+  }
+
+  if (dosenList.length > 0) {
+    groups['Dosen'] = dosenList;
+  }
+
+  // 3. Write each tab starting at B5
+  const results: { tabName: string; count: number }[] = [];
+
+  for (const [tabName, items] of Object.entries(groups)) {
+    // Sort by NIM
+    items.sort((a, b) => String(a.nim).localeCompare(String(b.nim)));
+
+    const rows = items.map((item) => [
+      item.check_in_time,
+      item.attendance_date,
+      item.nim,
+      item.name,
+      normalizeAngkatan(item.class_name),
+      item.status,
+      item.notes,
+      item.synced_at,
+    ]);
+
+    await clearAndRewriteTab(sheetId, tabName, rows);
+    results.push({ tabName, count: rows.length });
+  }
+
+  return results;
+}
+
+/**
+ * Synchronize attendance records categorized automatically into separate tabs:
+ * - Dosen -> Tab "Dosen"
+ * - Mahasiswa Angkatan 25 -> Tab "Angkatan 25"
+ * - Mahasiswa Angkatan 26 -> Tab "Angkatan 26"
+ * etc.
+ * All starting at B4, neatly formatted.
+ */
+export async function syncCategorizedAttendances(sheetId: string, attendances: any[]) {
+  // Group attendances by target tab name
+  const groups: Record<string, any[]> = {};
+
+  for (const att of attendances) {
+    const tabName = getTargetTabName(att);
+    if (!groups[tabName]) {
+      groups[tabName] = [];
+    }
+    groups[tabName].push(att);
+  }
+
+  const results: { tabName: string; count: number }[] = [];
+
+  for (const [tabName, groupItems] of Object.entries(groups)) {
+    // Format rows
+    const dataRows = groupItems.map((item) => [
+      item.check_in_time ? item.check_in_time.slice(0, 5) + ' WIB' : '-',
+      item.attendance_date || '-',
+      item.nim || '-',
+      item.name || '-',
+      normalizeAngkatan(item.class_name),
+      item.status || 'Hadir',
+      item.notes || '-',
+      new Date().toLocaleString('id-ID'),
+    ]);
+
+    await clearAndRewriteTab(sheetId, tabName, dataRows);
+    results.push({ tabName, count: dataRows.length });
+  }
+
+  return results;
+}
