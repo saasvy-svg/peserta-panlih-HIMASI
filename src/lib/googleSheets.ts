@@ -866,6 +866,9 @@ export async function syncCategorizedWithMasterRoster(
     activeDay?: number | 'auto';
   }
 ) {
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
   const normalizedDays =
     dayOptions?.days && dayOptions.days.length > 0
       ? dayOptions.days
