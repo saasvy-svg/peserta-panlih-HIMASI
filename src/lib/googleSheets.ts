@@ -1,21 +1,45 @@
 import { google } from 'googleapis';
 import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
 import { getWIBDate, getWIBTime, getWIBLocaleString } from '@/lib/utils';
-import { getNextWIBDate } from '@/lib/dayHelper';
+import { getNextWIBDate, getDaysList } from '@/lib/dayHelper';
+import { DayConfigItem } from '@/types/database';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
-export const DEFAULT_HEADERS = [
-  'No',
-  'Waktu Masuk',
-  'Tanggal Presensi',
-  'NIM / NIP',
-  'Nama Lengkap',
-  'Angkatan',
-  'Status Presensi',
-  'Catatan / Alasan',
-  'Tercatat Pada',
-];
+/**
+ * Converts a 0-based column index to an Excel/Google Sheets column letter.
+ * 0 -> 'A', 1 -> 'B', 25 -> 'Z', 26 -> 'AA', etc.
+ */
+export function getColumnLetter(colIndex: number): string {
+  let temp = colIndex + 1;
+  let letter = '';
+  while (temp > 0) {
+    const mod = (temp - 1) % 26;
+    letter = String.fromCharCode(65 + mod) + letter;
+    temp = Math.floor((temp - mod) / 26);
+  }
+  return letter;
+}
+
+/**
+ * Builds the clean Model B matrix table headers dynamically based on configured days:
+ * [No, NIM / NIP, Nama Lengkap, Angkatan, Hari 1 (tgl), Hari 2 (tgl), ..., Total Hadir, Catatan / Alasan, Sinkron Terakhir]
+ */
+export function buildModelBHeaders(days: DayConfigItem[]): string[] {
+  const baseHeaders = ['No', 'NIM / NIP', 'Nama Lengkap', 'Angkatan'];
+
+  const dayHeaders = days.map((d) => {
+    const dateParts = (d.date || '').split('-');
+    const shortDate =
+      dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}` : d.date;
+    return `Hari ${d.dayNumber} (${shortDate})`;
+  });
+
+  const trailingHeaders = ['Total Hadir', 'Catatan / Alasan', 'Sinkron Terakhir'];
+  return [...baseHeaders, ...dayHeaders, ...trailingHeaders];
+}
+
+export const DEFAULT_HEADERS = buildModelBHeaders(getDaysList());
 
 /**
  * Extracts pure Sheet ID from a full Google Sheets URL or raw ID
@@ -72,13 +96,12 @@ export async function testSheetConnection(sheetId: string) {
 const tabNumericIdCache = new Map<string, number>();
 
 /**
- * Ensure sheet tab exists with headers starting at B4 and stylish formatting.
- * If default "Sheet1" is empty, it can be renamed to the desired tabName.
+ * Ensure sheet tab exists with Model B headers starting at B4 and stylish formatting.
  */
 export async function ensureSheetTab(
   sheetId: string,
   tabName: string,
-  headers: string[] = DEFAULT_HEADERS
+  days: DayConfigItem[] = getDaysList()
 ): Promise<{ sheetNumericId: number; createdOrRenamed: boolean }> {
   const cacheKey = `${sheetId}:${tabName}`;
   if (tabNumericIdCache.has(cacheKey)) {
@@ -95,10 +118,8 @@ export async function ensureSheetTab(
   let isNew = false;
 
   if (!existingSheet) {
-    // Check if there is an untouched "Sheet1" that can be renamed
     const sheet1 = allSheets.find((s) => s.properties?.title === 'Sheet1');
     if (sheet1 && allSheets.length === 1) {
-      // Check if Sheet1 is empty
       const checkData = await sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
         range: 'Sheet1!A1:Z10',
@@ -106,7 +127,6 @@ export async function ensureSheetTab(
       const hasValues = checkData.data.values && checkData.data.values.length > 0;
 
       if (!hasValues) {
-        // Rename Sheet1 to tabName
         sheetNumericId = sheet1.properties?.sheetId ?? 0;
         await sheets.spreadsheets.batchUpdate({
           spreadsheetId: sheetId,
@@ -129,7 +149,6 @@ export async function ensureSheetTab(
     }
 
     if (!isNew) {
-      // Add a new tab
       const addRes = await sheets.spreadsheets.batchUpdate({
         spreadsheetId: sheetId,
         requestBody: {
@@ -149,52 +168,47 @@ export async function ensureSheetTab(
     }
   }
 
-  // Check if header already exists at B4
-  const headerCheck = await sheets.spreadsheets.values.get({
+  const headers = buildModelBHeaders(days);
+  const endColLetter = getColumnLetter(headers.length); // Col B is index 1
+
+  // Write Title Banner (B2:B3) and Column Headers (B4:endColLetter4)
+  await sheets.spreadsheets.values.update({
     spreadsheetId: sheetId,
-    range: `${tabName}!B4:J4`,
+    range: `'${tabName}'!B2:${endColLetter}4`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [
+        [`REKAP PRESENSI - ${tabName.toUpperCase()} (MULTI-DAY)`],
+        [`Diperbarui otomatis oleh Sistem Absensi • Terkoneksi Realtime`],
+        headers,
+      ],
+    },
   });
 
-  const headersPresent =
-    headerCheck.data.values &&
-    headerCheck.data.values.length > 0 &&
-    headerCheck.data.values[0][0] === headers[0];
-
-  if (!headersPresent) {
-    // 1. Write Title Banner (B2:B3) and Column Headers (B4:J4)
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: sheetId,
-      range: `${tabName}!B2:J4`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: {
-        values: [
-          [`REKAP PRESENSI - ${tabName.toUpperCase()} - HARI KE-1`],
-          [`Diperbarui otomatis oleh Sistem Absensi • Terkoneksi Realtime`],
-          headers,
-        ],
-      },
-    });
-
-    // 2. Apply styling (freeze row 4, dark blue header format, fonts, banner format)
-    await applyHeaderStyles(sheetId, sheetNumericId, headers.length);
-  }
+  // Apply neat styling for Model B
+  await applyModelBHeaderStyles(sheetId, sheetNumericId, days.length, headers.length);
 
   tabNumericIdCache.set(cacheKey, sheetNumericId);
   return { sheetNumericId, createdOrRenamed: isNew };
 }
 
 /**
- * Apply neat styles to headers and title banner for Day 1 (Cols B to J)
+ * Apply neat styles to headers and title banner for Model B Matrix Table
  */
-export async function applyHeaderStyles(
+export async function applyModelBHeaderStyles(
   sheetId: string,
   sheetNumericId: number,
-  columnCount: number = 9
+  daysCount: number,
+  totalColumns: number
 ) {
   const auth = getAuthClient();
   const sheets = google.sheets({ version: 'v4', auth });
 
-  const endColumnIndex = 1 + columnCount; // Column B is index 1
+  const startColIndex = 1; // Column B is index 1
+  const endColIndex = startColIndex + totalColumns; // e.g. 1 + 9 = 10
+
+  const dayStartColIndex = 5; // Column F (index 5) is first Day column
+  const dayEndColIndex = dayStartColIndex + daysCount; // Up to last day column
 
   const requests: any[] = [
     // 1. Freeze top 4 rows
@@ -215,7 +229,7 @@ export async function applyHeaderStyles(
       repeatCell: {
         range: {
           sheetId: sheetNumericId,
-          startRowIndex: 1, // row 2 (0-indexed)
+          startRowIndex: 1, // row 2
           endRowIndex: 2,
           startColumnIndex: 1,
           endColumnIndex: 6,
@@ -256,7 +270,7 @@ export async function applyHeaderStyles(
       },
     },
 
-    // 4. Format Table Header at B4 (Row 4)
+    // 4. Base Table Header at B4 (Row 4) - Dark Slate
     {
       repeatCell: {
         range: {
@@ -264,7 +278,7 @@ export async function applyHeaderStyles(
           startRowIndex: 3, // row 4
           endRowIndex: 4,
           startColumnIndex: 1,
-          endColumnIndex: endColumnIndex,
+          endColumnIndex: endColIndex,
         },
         cell: {
           userEnteredFormat: {
@@ -284,7 +298,34 @@ export async function applyHeaderStyles(
       },
     },
 
-    // 5. Header Borders
+    // 5. Highlight Day Columns (F onwards) with Deep Emerald/Teal Header
+    {
+      repeatCell: {
+        range: {
+          sheetId: sheetNumericId,
+          startRowIndex: 3,
+          endRowIndex: 4,
+          startColumnIndex: dayStartColIndex,
+          endColumnIndex: dayEndColIndex,
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.04, green: 0.38, blue: 0.27 }, // Emerald Green #065F46
+            textFormat: {
+              foregroundColor: { red: 1, green: 1, blue: 1 },
+              bold: true,
+              fontSize: 10,
+            },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+            wrapStrategy: 'WRAP',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+
+    // 6. Header Borders
     {
       updateBorders: {
         range: {
@@ -292,7 +333,7 @@ export async function applyHeaderStyles(
           startRowIndex: 3,
           endRowIndex: 4,
           startColumnIndex: 1,
-          endColumnIndex: endColumnIndex,
+          endColumnIndex: endColIndex,
         },
         top: { style: 'SOLID', color: { red: 0.12, green: 0.16, blue: 0.24 } },
         bottom: { style: 'SOLID_MEDIUM', color: { red: 0.12, green: 0.16, blue: 0.24 } },
@@ -302,7 +343,7 @@ export async function applyHeaderStyles(
       },
     },
 
-    // 6. Set Header Row Height (36px)
+    // 7. Set Header Row Height (36px)
     {
       updateDimensionProperties: {
         range: {
@@ -318,14 +359,14 @@ export async function applyHeaderStyles(
       },
     },
 
-    // 7. Auto Resize Columns (B to J)
+    // 8. Auto Resize Columns
     {
       autoResizeDimensions: {
         dimensions: {
           sheetId: sheetNumericId,
           dimension: 'COLUMNS',
           startIndex: 1,
-          endIndex: endColumnIndex,
+          endIndex: endColIndex,
         },
       },
     },
@@ -337,209 +378,21 @@ export async function applyHeaderStyles(
       requestBody: { requests },
     });
   } catch (err: any) {
-    console.error('Failed applying header styles:', err.message);
+    console.error('Failed applying Model B header styles:', err.message);
   }
 }
 
 /**
- * Ensure Day 2 headers exist starting at column L (L4:T4) and title banner (L2:T3).
- * Column K is preserved as an empty spacer divider.
+ * Format data rows for Model B matrix table:
+ * - Center: No, NIM, Angkatan, Day columns, Total Hadir, Sync
+ * - Left: Nama, Catatan
  */
-export async function ensureDay2Headers(
-  sheetId: string,
-  sheetNumericId: number,
-  tabName: string,
-  headers: string[] = DEFAULT_HEADERS
-) {
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  const headerCheck = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `'${tabName}'!L4:T4`,
-  });
-
-  const headersPresent =
-    headerCheck.data.values &&
-    headerCheck.data.values.length > 0 &&
-    headerCheck.data.values[0][0] === headers[0];
-
-  if (!headersPresent) {
-    // 1. Write Day 2 Title Banner (L2:L3) and Headers (L4:T4)
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: sheetId,
-      range: `'${tabName}'!L2:T4`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: {
-        values: [
-          [`REKAP PRESENSI - ${tabName.toUpperCase()} - HARI KE-2`],
-          [`Presensi Hari Ke-2 • Terkoneksi Realtime`],
-          headers,
-        ],
-      },
-    });
-
-    // 2. Apply styling (Emerald theme for Day 2 + spacer on Column K)
-    await applyDay2HeaderStyles(sheetId, sheetNumericId, headers.length);
-  }
-}
-
-/**
- * Apply neat styles to headers and title banner for Day 2 (Cols L to T)
- * with Column K styled as a neat divider spacer.
- */
-export async function applyDay2HeaderStyles(
-  sheetId: string,
-  sheetNumericId: number,
-  columnCount: number = 9
-) {
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  const startColumnIndex = 11; // Column L is index 11
-  const endColumnIndex = startColumnIndex + columnCount; // Column T is index 20
-
-  const requests: any[] = [
-    // 1. Set Column K (Spacer) width to 35px
-    {
-      updateDimensionProperties: {
-        range: {
-          sheetId: sheetNumericId,
-          dimension: 'COLUMNS',
-          startIndex: 10, // Column K
-          endIndex: 11,
-        },
-        properties: {
-          pixelSize: 35,
-        },
-        fields: 'pixelSize',
-      },
-    },
-
-    // 2. Format Title Banner at L2
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex: 1, // row 2
-          endRowIndex: 2,
-          startColumnIndex: 11,
-          endColumnIndex: 16,
-        },
-        cell: {
-          userEnteredFormat: {
-            textFormat: {
-              bold: true,
-              fontSize: 13,
-              foregroundColor: { red: 0.04, green: 0.38, blue: 0.27 }, // Emerald Green #065F46
-            },
-          },
-        },
-        fields: 'userEnteredFormat.textFormat',
-      },
-    },
-
-    // 3. Format Subtitle at L3
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex: 2, // row 3
-          endRowIndex: 3,
-          startColumnIndex: 11,
-          endColumnIndex: 16,
-        },
-        cell: {
-          userEnteredFormat: {
-            textFormat: {
-              italic: true,
-              fontSize: 9,
-              foregroundColor: { red: 0.39, green: 0.45, blue: 0.55 }, // Gray #64748B
-            },
-          },
-        },
-        fields: 'userEnteredFormat.textFormat',
-      },
-    },
-
-    // 4. Format Table Header at L4 (Row 4) - Deep Emerald
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex: 3, // row 4
-          endRowIndex: 4,
-          startColumnIndex: 11,
-          endColumnIndex: endColumnIndex,
-        },
-        cell: {
-          userEnteredFormat: {
-            backgroundColor: { red: 0.02, green: 0.31, blue: 0.23 }, // Deep Emerald #064E3B
-            textFormat: {
-              foregroundColor: { red: 1, green: 1, blue: 1 },
-              bold: true,
-              fontSize: 10,
-            },
-            horizontalAlignment: 'CENTER',
-            verticalAlignment: 'MIDDLE',
-            wrapStrategy: 'WRAP',
-          },
-        },
-        fields:
-          'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
-      },
-    },
-
-    // 5. Header Borders
-    {
-      updateBorders: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex: 3,
-          endRowIndex: 4,
-          startColumnIndex: 11,
-          endColumnIndex: endColumnIndex,
-        },
-        top: { style: 'SOLID', color: { red: 0.02, green: 0.31, blue: 0.23 } },
-        bottom: { style: 'SOLID_MEDIUM', color: { red: 0.02, green: 0.31, blue: 0.23 } },
-        left: { style: 'SOLID', color: { red: 0.02, green: 0.31, blue: 0.23 } },
-        right: { style: 'SOLID', color: { red: 0.02, green: 0.31, blue: 0.23 } },
-        innerVertical: { style: 'SOLID', color: { red: 0.15, green: 0.45, blue: 0.35 } },
-      },
-    },
-
-    // 6. Auto Resize Columns (L to T)
-    {
-      autoResizeDimensions: {
-        dimensions: {
-          sheetId: sheetNumericId,
-          dimension: 'COLUMNS',
-          startIndex: 11,
-          endIndex: endColumnIndex,
-        },
-      },
-    },
-  ];
-
-  try {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests },
-    });
-  } catch (err: any) {
-    console.error('Failed applying Day 2 header styles:', err.message);
-  }
-}
-
-/**
- * Format data rows with borders, middle vertical alignment, and proper column alignment (Day 1: Cols B to J).
- */
-export async function applyDataRowStyles(
+export async function applyModelBDataRowStyles(
   sheetId: string,
   sheetNumericId: number,
   startRow: number, // 1-indexed (e.g. 5)
   totalRows: number,
-  columnCount: number = 9
+  totalColumns: number
 ) {
   if (totalRows <= 0) return;
 
@@ -548,7 +401,7 @@ export async function applyDataRowStyles(
 
   const startRowIndex = startRow - 1; // 0-indexed
   const endRowIndex = startRowIndex + totalRows;
-  const endColumnIndex = 1 + columnCount;
+  const endColIndex = 1 + totalColumns;
 
   const requests: any[] = [
     // 1. Thin borders around and inside data cells
@@ -559,7 +412,7 @@ export async function applyDataRowStyles(
           startRowIndex,
           endRowIndex,
           startColumnIndex: 1,
-          endColumnIndex,
+          endColumnIndex: endColIndex,
         },
         top: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
         bottom: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
@@ -570,7 +423,7 @@ export async function applyDataRowStyles(
       },
     },
 
-    // 2. Base alignment & font for data cells
+    // 2. Base alignment & font
     {
       repeatCell: {
         range: {
@@ -578,7 +431,7 @@ export async function applyDataRowStyles(
           startRowIndex,
           endRowIndex,
           startColumnIndex: 1,
-          endColumnIndex,
+          endColumnIndex: endColIndex,
         },
         cell: {
           userEnteredFormat: {
@@ -593,15 +446,15 @@ export async function applyDataRowStyles(
       },
     },
 
-    // 3. Center alignment for No (Col B), Jam (Col C), Tanggal (Col D), NIM (Col E)
+    // 3. Center alignment for No (Col B), NIM (Col C)
     {
       repeatCell: {
         range: {
           sheetId: sheetNumericId,
           startRowIndex,
           endRowIndex,
-          startColumnIndex: 1, // Col B (No)
-          endColumnIndex: 5, // Col E (NIM)
+          startColumnIndex: 1, // Col B
+          endColumnIndex: 3, // Up to Col C
         },
         cell: {
           userEnteredFormat: {
@@ -611,49 +464,48 @@ export async function applyDataRowStyles(
         fields: 'userEnteredFormat.horizontalAlignment',
       },
     },
+
+    // 4. Center alignment for Angkatan (Col E)
     {
       repeatCell: {
         range: {
           sheetId: sheetNumericId,
           startRowIndex,
           endRowIndex,
-          startColumnIndex: 6, // Col G (Angkatan)
-          endColumnIndex: 8, // Col H (Status)
+          startColumnIndex: 4, // Col E
+          endColumnIndex: 5,
         },
         cell: {
           userEnteredFormat: {
             horizontalAlignment: 'CENTER',
-            textFormat: {
-              bold: true,
-            },
+            textFormat: { bold: true },
           },
         },
         fields: 'userEnteredFormat(horizontalAlignment,textFormat.bold)',
       },
     },
+
+    // 5. Center alignment for Day Columns (Col F onwards)
     {
       repeatCell: {
         range: {
           sheetId: sheetNumericId,
           startRowIndex,
           endRowIndex,
-          startColumnIndex: 9, // Col J (Waktu Sinkron)
-          endColumnIndex: 10,
+          startColumnIndex: 5, // Col F
+          endColumnIndex: endColIndex - 2, // Up to Total Hadir
         },
         cell: {
           userEnteredFormat: {
             horizontalAlignment: 'CENTER',
-            textFormat: {
-              fontSize: 9,
-              foregroundColor: { red: 0.45, green: 0.5, blue: 0.58 },
-            },
+            textFormat: { bold: true },
           },
         },
-        fields: 'userEnteredFormat(horizontalAlignment,textFormat)',
+        fields: 'userEnteredFormat(horizontalAlignment,textFormat.bold)',
       },
     },
 
-    // 4. Set comfortable row heights (28px)
+    // 6. Set row height (28px)
     {
       updateDimensionProperties: {
         range: {
@@ -669,14 +521,14 @@ export async function applyDataRowStyles(
       },
     },
 
-    // 5. Auto resize columns to fit text
+    // 7. Auto resize columns
     {
       autoResizeDimensions: {
         dimensions: {
           sheetId: sheetNumericId,
           dimension: 'COLUMNS',
           startIndex: 1,
-          endIndex: endColumnIndex,
+          endIndex: endColIndex,
         },
       },
     },
@@ -688,272 +540,18 @@ export async function applyDataRowStyles(
       requestBody: { requests },
     });
   } catch (err: any) {
-    console.error('Failed applying data row styles:', err.message);
+    console.error('Failed applying Model B data row styles:', err.message);
   }
 }
 
 /**
- * Format data rows for Day 2 (Cols L to T) with proper alignment, borders, and column styling.
+ * Finds the best matching tab title in the spreadsheet (e.g. "Angkatan 2025" vs "Angkatan 25").
  */
-export async function applyDay2DataRowStyles(
+export async function getExistingTabTitle(
   sheetId: string,
-  sheetNumericId: number,
-  startRow: number, // 1-indexed (e.g. 5)
-  totalRows: number,
-  columnCount: number = 9
-) {
-  if (totalRows <= 0) return;
-
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  const startRowIndex = startRow - 1; // 0-indexed
-  const endRowIndex = startRowIndex + totalRows;
-  const startColumnIndex = 11; // Column L
-  const endColumnIndex = startColumnIndex + columnCount; // Column T is index 20
-
-  const requests: any[] = [
-    // 1. Thin borders around and inside data cells
-    {
-      updateBorders: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex,
-          endRowIndex,
-          startColumnIndex,
-          endColumnIndex,
-        },
-        top: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
-        bottom: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
-        left: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
-        right: { style: 'SOLID', color: { red: 0.85, green: 0.88, blue: 0.92 } },
-        innerHorizontal: { style: 'SOLID', color: { red: 0.9, green: 0.92, blue: 0.95 } },
-        innerVertical: { style: 'SOLID', color: { red: 0.9, green: 0.92, blue: 0.95 } },
-      },
-    },
-
-    // 2. Base alignment & font for data cells
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex,
-          endRowIndex,
-          startColumnIndex,
-          endColumnIndex,
-        },
-        cell: {
-          userEnteredFormat: {
-            verticalAlignment: 'MIDDLE',
-            textFormat: {
-              fontSize: 10,
-              foregroundColor: { red: 0.1, green: 0.12, blue: 0.15 },
-            },
-          },
-        },
-        fields: 'userEnteredFormat(verticalAlignment,textFormat.fontSize,textFormat.foregroundColor)',
-      },
-    },
-
-    // 3. Center alignment for No (Col L=11), Jam (Col M=12), Tanggal (Col N=13), NIM (Col O=14)
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex,
-          endRowIndex,
-          startColumnIndex: 11, // Col L (No)
-          endColumnIndex: 15, // Up to Col O (NIM)
-        },
-        cell: {
-          userEnteredFormat: {
-            horizontalAlignment: 'CENTER',
-          },
-        },
-        fields: 'userEnteredFormat.horizontalAlignment',
-      },
-    },
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex,
-          endRowIndex,
-          startColumnIndex: 16, // Col Q (Angkatan)
-          endColumnIndex: 18, // Col R (Status)
-        },
-        cell: {
-          userEnteredFormat: {
-            horizontalAlignment: 'CENTER',
-            textFormat: {
-              bold: true,
-            },
-          },
-        },
-        fields: 'userEnteredFormat(horizontalAlignment,textFormat.bold)',
-      },
-    },
-    {
-      repeatCell: {
-        range: {
-          sheetId: sheetNumericId,
-          startRowIndex,
-          endRowIndex,
-          startColumnIndex: 19, // Col T (Waktu Sync)
-          endColumnIndex: 20,
-        },
-        cell: {
-          userEnteredFormat: {
-            horizontalAlignment: 'CENTER',
-            textFormat: {
-              fontSize: 9,
-              foregroundColor: { red: 0.45, green: 0.5, blue: 0.58 },
-            },
-          },
-        },
-        fields: 'userEnteredFormat(horizontalAlignment,textFormat)',
-      },
-    },
-
-    // 4. Set comfortable row heights (28px)
-    {
-      updateDimensionProperties: {
-        range: {
-          sheetId: sheetNumericId,
-          dimension: 'ROWS',
-          startIndex: startRowIndex,
-          endIndex: endRowIndex,
-        },
-        properties: {
-          pixelSize: 28,
-        },
-        fields: 'pixelSize',
-      },
-    },
-
-    // 5. Auto resize columns (L to T)
-    {
-      autoResizeDimensions: {
-        dimensions: {
-          sheetId: sheetNumericId,
-          dimension: 'COLUMNS',
-          startIndex: 11,
-          endIndex: endColumnIndex,
-        },
-      },
-    },
-  ];
-
-  try {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests },
-    });
-  } catch (err: any) {
-    console.error('Failed applying Day 2 data row styles:', err.message);
-  }
-}
-
-/**
- * Appends a single row to a target tab starting at column B, after the last filled row.
- */
-export async function appendRowToTab(sheetId: string, tabName: string, rowValues: any[]) {
-  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
-
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  // Find the last row in Column B
-  const colBData = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `${tabName}!B4:B`,
-  });
-
-  const existingCount = colBData.data.values?.length || 1; // Row 4 is header, so existingCount=1 means table has header only
-  const nextRowNum = 4 + existingCount; // e.g. 4 + 1 = 5 (starts at B5)
-  const nextNo = existingCount; // 1, 2, 3...
-
-  // Prepend number if not supplied
-  const fullRow = [nextNo, ...rowValues];
-
-  // Write row starting at B[nextRowNum]
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `${tabName}!B${nextRowNum}:J${nextRowNum}`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [fullRow],
-    },
-  });
-
-  // Apply neat styles for this newly appended row
-  await applyDataRowStyles(sheetId, sheetNumericId, nextRowNum, 1, fullRow.length);
-}
-
-/**
- * Clears data in the specified column range from row 5 downwards and rewrites neat table.
- * Defaults to columns B to J (Day 1). For Day 2, pass 'L' and 'T'.
- * Preserves neighboring tables completely!
- */
-export async function clearAndRewriteTab(
-  sheetId: string,
-  tabName: string,
-  dataRows: any[][],
-  startColLetter: string = 'B',
-  endColLetter: string = 'J'
-) {
-  const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
-
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  // Clear ONLY target column range (never wipe adjacent tables)
-  try {
-    await sheets.spreadsheets.values.clear({
-      spreadsheetId: sheetId,
-      range: `'${tabName}'!${startColLetter}5:${endColLetter}1000`,
-    });
-  } catch (e: any) {
-    // Ignore clear errors
-  }
-
-  if (!dataRows || dataRows.length === 0) return;
-
-  // Add numbering to first column
-  const numberedRows = dataRows.map((row, idx) => [idx + 1, ...row]);
-  const endRowNum = 4 + numberedRows.length;
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `'${tabName}'!${startColLetter}5:${endColLetter}${endRowNum}`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: numberedRows,
-    },
-  });
-
-  // Apply neat styles
-  if (startColLetter === 'B') {
-    await applyDataRowStyles(sheetId, sheetNumericId, 5, numberedRows.length, DEFAULT_HEADERS.length);
-  } else if (startColLetter === 'L') {
-    await applyDay2DataRowStyles(sheetId, sheetNumericId, 5, numberedRows.length, DEFAULT_HEADERS.length);
-  }
-}
-
-/**
- * Backwards compatibility wrapper for appendRows
- */
-export async function appendRows(sheetId: string, tabName: string, rows: any[][]) {
-  if (!rows || rows.length === 0) return;
-  for (const row of rows) {
-    await appendRowToTab(sheetId, tabName, row);
-  }
-}
-
-/**
- * Finds the best matching tab title in the spreadsheet (handling variations like "Angkatan 25" vs "Angkatan 2025").
- */
-export async function getExistingTabTitle(sheetId: string, requestedTabName: string): Promise<{ title: string; numericId: number }> {
+  requestedTabName: string,
+  days: DayConfigItem[] = getDaysList()
+): Promise<{ title: string; numericId: number }> {
   const cacheKey = `${sheetId}:${requestedTabName}`;
   if (tabNumericIdCache.has(cacheKey)) {
     return { title: requestedTabName, numericId: tabNumericIdCache.get(cacheKey)! };
@@ -964,30 +562,37 @@ export async function getExistingTabTitle(sheetId: string, requestedTabName: str
   const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
   const allSheets = meta.data.sheets || [];
 
-  // 1. Exact match
-  let found = allSheets.find(s => s.properties?.title === requestedTabName);
-  
-  // 2. Case-insensitive match
+  // Exact match
+  let found = allSheets.find((s) => s.properties?.title === requestedTabName);
+
+  // Case-insensitive match
   if (!found) {
-    found = allSheets.find(s => s.properties?.title?.toLowerCase() === requestedTabName.toLowerCase());
+    found = allSheets.find(
+      (s) => s.properties?.title?.toLowerCase() === requestedTabName.toLowerCase()
+    );
   }
 
-  // 3. Flexible Angkatan matching (e.g. "Angkatan 25" vs "Angkatan 2025")
+  // Flexible Angkatan match
   if (!found && requestedTabName.toLowerCase().includes('angkatan')) {
     const digits = requestedTabName.match(/\d+/)?.[0];
     if (digits) {
-      const shortYear = digits.slice(-2); // "25"
-      const longYear = `20${shortYear}`; // "2025"
-      found = allSheets.find(s => {
+      const shortYear = digits.slice(-2);
+      const longYear = `20${shortYear}`;
+      found = allSheets.find((s) => {
         const title = s.properties?.title || '';
-        return title.toLowerCase().includes('angkatan') && (title.includes(shortYear) || title.includes(longYear));
+        return (
+          title.toLowerCase().includes('angkatan') &&
+          (title.includes(shortYear) || title.includes(longYear))
+        );
       });
     }
   }
 
-  // 4. Flexible Dosen matching
+  // Flexible Dosen match
   if (!found && requestedTabName.toLowerCase().includes('dosen')) {
-    found = allSheets.find(s => s.properties?.title?.toLowerCase().includes('dosen'));
+    found = allSheets.find((s) =>
+      s.properties?.title?.toLowerCase().includes('dosen')
+    );
   }
 
   if (found && found.properties?.title) {
@@ -996,16 +601,15 @@ export async function getExistingTabTitle(sheetId: string, requestedTabName: str
     return { title: found.properties.title, numericId };
   }
 
-  // Not found in existing sheets, ensure it
-  const { sheetNumericId } = await ensureSheetTab(sheetId, requestedTabName);
+  const { sheetNumericId } = await ensureSheetTab(sheetId, requestedTabName, days);
   tabNumericIdCache.set(cacheKey, sheetNumericId);
   return { title: requestedTabName, numericId: sheetNumericId };
 }
 
 /**
- * Updates a student's row in-place if their NIM is already in the sheet (e.g. from pre-populated roster).
- * If the student is not yet in the sheet, appends a new row at the bottom.
- * Supports day 1 (Cols B:J) and day 2 (Cols L:T side-by-side).
+ * Updates a student's row in-place in Model B Matrix Table:
+ * Updates the specific cell for Day X (Column F for Day 1, G for Day 2, etc.),
+ * recalculates Total Hadir, and updates Catatan & Sync timestamp.
  */
 export async function updateOrAppendAttendanceInSheet(
   sheetId: string,
@@ -1019,478 +623,144 @@ export async function updateOrAppendAttendanceInSheet(
     status?: string;
     notes?: string | null;
   },
-  day: 1 | 2 = 1
+  day: number = 1,
+  days: DayConfigItem[] = getDaysList()
 ) {
+  const normalizedDays = days && days.length > 0 ? days : getDaysList();
   const requestedTabName = getTargetTabName(record);
-  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(sheetId, requestedTabName);
+  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(
+    sheetId,
+    requestedTabName,
+    normalizedDays
+  );
 
   const auth = getAuthClient();
   const sheets = google.sheets({ version: 'v4', auth });
 
-  // 1. Fetch column E (NIM) and column F (Nama) from row 1 to bottom
-  const colEF = await sheets.spreadsheets.values.get({
+  // 1. Fetch column C (NIM) and column D (Nama) from row 1 to bottom
+  const colCD = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `'${tabName}'!E:F`,
+    range: `'${tabName}'!C:D`,
   });
 
-  const rowValues = colEF.data.values || [];
+  const rowValues = colCD.data.values || [];
   const targetNim = String(record.nim || '').trim().toUpperCase();
   const targetName = String(record.name || '').trim().toUpperCase();
 
-  // Index 0 = Row 1. Row 4 is header, row 5 is index 4.
   let foundRowNumber = -1;
   for (let i = 0; i < rowValues.length; i++) {
     const rowNim = String(rowValues[i]?.[0] || '').trim().toUpperCase();
     const rowName = String(rowValues[i]?.[1] || '').trim().toUpperCase();
 
     if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
-      foundRowNumber = i + 1; // Exactly row number in Google Sheets!
+      foundRowNumber = i + 1; // 1-indexed row number
       break;
     }
   }
 
-  // If not found in E:F and day === 2, check column O:P (Day 2 NIM and Nama)
-  if (foundRowNumber === -1 && day === 2) {
-    const colOP = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: `'${tabName}'!O:P`,
-    });
-    const rowValuesDay2 = colOP.data.values || [];
-    for (let i = 0; i < rowValuesDay2.length; i++) {
-      const rowNim = String(rowValuesDay2[i]?.[0] || '').trim().toUpperCase();
-      const rowName = String(rowValuesDay2[i]?.[1] || '').trim().toUpperCase();
-
-      if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
-        foundRowNumber = i + 1;
-        break;
-      }
-    }
-  }
-
   const rawTime = record.check_in_time || getWIBTime();
-  const formattedTime = (rawTime.length > 5 ? rawTime.slice(0, 5) : rawTime) + ' WIB';
-  const formattedDate = record.attendance_date || getWIBDate();
-  const tercatatWIB = getWIBLocaleString();
+  const timeFormatted = rawTime.slice(0, 5) + ' WIB';
+  const statusFormatted =
+    record.status === 'Hadir'
+      ? `Hadir (${timeFormatted})`
+      : record.status || 'Hadir';
 
-  if (day === 2) {
-    // Ensure Day 2 headers exist at L2:T4
-    await ensureDay2Headers(sheetId, sheetNumericId, tabName);
+  const dayIndex = day > 0 ? day : 1;
+  // Day 1 is at index 5 (Col F), Day 2 is at index 6 (Col G), etc.
+  const dayColIndex = 4 + dayIndex;
+  const dayColLetter = getColumnLetter(dayColIndex);
 
-    if (foundRowNumber !== -1) {
-      // IN-PLACE UPDATE on Day 2 columns (L to T)
-      // L: No, M: Waktu Masuk, N: Tanggal, O: NIM, P: Nama, Q: Angkatan, R: Status, S: Catatan, T: Tercatat Pada
-      const studentNo = foundRowNumber - 4 > 0 ? foundRowNumber - 4 : 1;
-      const updateValues = [
-        studentNo,
-        formattedTime,
-        formattedDate,
-        record.nim,
-        record.name,
-        normalizeAngkatan(record.class_name),
-        record.status || 'Hadir',
-        record.notes || '-',
-        tercatatWIB,
-      ];
+  const totalHadirColIndex = 4 + normalizedDays.length + 1;
+  const totalHadirColLetter = getColumnLetter(totalHadirColIndex);
 
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: `'${tabName}'!L${foundRowNumber}:T${foundRowNumber}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [updateValues],
-        },
-      });
+  const catatanColLetter = getColumnLetter(totalHadirColIndex + 1);
+  const syncColLetter = getColumnLetter(totalHadirColIndex + 2);
+  const syncTime = getWIBLocaleString();
 
-      await applyDay2DataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1);
-      return { action: 'updated_day2', rowNumber: foundRowNumber, tabName };
-    } else {
-      // Append to bottom of Day 2 table
-      const colLData = await sheets.spreadsheets.values.get({
-        spreadsheetId: sheetId,
-        range: `'${tabName}'!L4:L`,
-      });
-      const existingCount = colLData.data.values?.length || 1;
-      const nextRowNum = 4 + existingCount;
-      const nextNo = existingCount;
-
-      const newRow = [
-        nextNo,
-        formattedTime,
-        formattedDate,
-        record.nim,
-        record.name,
-        normalizeAngkatan(record.class_name),
-        record.status || 'Hadir',
-        record.notes || '-',
-        tercatatWIB,
-      ];
-
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: `'${tabName}'!L${nextRowNum}:T${nextRowNum}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [newRow],
-        },
-      });
-
-      await applyDay2DataRowStyles(sheetId, sheetNumericId, nextRowNum, 1);
-      return { action: 'appended_day2', tabName };
-    }
-  }
-
-  // DAY 1 (Default behavior on B:J)
   if (foundRowNumber !== -1) {
-    // IN-PLACE UPDATE on existing student row! (Columns C to J)
-    // C: Waktu Masuk, D: Tanggal, E: NIM, F: Nama, G: Angkatan, H: Status, I: Catatan, J: Tercatat Pada
-    const updateValues = [
-      formattedTime,
-      formattedDate,
+    // 2. IN-PLACE UPDATE on existing student row:
+    // Update the Day cell
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${dayColLetter}${foundRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[statusFormatted]],
+      },
+    });
+
+    // Read the entire Day range for this row to compute Total Hadir
+    const firstDayLetter = getColumnLetter(5);
+    const lastDayLetter = getColumnLetter(4 + normalizedDays.length);
+    const dayCells = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${firstDayLetter}${foundRowNumber}:${lastDayLetter}${foundRowNumber}`,
+    });
+
+    const values = dayCells.data.values?.[0] || [];
+    let attendedCount = 0;
+    values.forEach((val: string) => {
+      const s = String(val || '').trim();
+      if (s && s !== '-' && s !== 'Belum Hadir') attendedCount++;
+    });
+
+    const totalHadirText = `${attendedCount} / ${normalizedDays.length} Hari`;
+
+    // Update Total Hadir, Catatan, and Sync Timestamp
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${totalHadirColLetter}${foundRowNumber}:${syncColLetter}${foundRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[totalHadirText, record.notes || '-', syncTime]],
+      },
+    });
+
+    return { action: 'updated_matrix', rowNumber: foundRowNumber, tabName };
+  } else {
+    // Student not pre-populated: Append to bottom of matrix table
+    const colBData = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!B4:B`,
+    });
+    const existingCount = colBData.data.values?.length || 1;
+    const nextRowNum = 4 + existingCount;
+    const nextNo = existingCount;
+
+    const dayValues = normalizedDays.map((d) =>
+      d.dayNumber === dayIndex ? statusFormatted : '-'
+    );
+
+    const fullRow = [
+      nextNo,
       record.nim,
       record.name,
       normalizeAngkatan(record.class_name),
-      record.status || 'Hadir',
+      ...dayValues,
+      `1 / ${normalizedDays.length} Hari`,
       record.notes || '-',
-      tercatatWIB,
+      syncTime,
     ];
+
+    const endColLetter = getColumnLetter(fullRow.length);
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
-      range: `'${tabName}'!C${foundRowNumber}:J${foundRowNumber}`,
+      range: `'${tabName}'!B${nextRowNum}:${endColLetter}${nextRowNum}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [updateValues],
+        values: [fullRow],
       },
     });
 
-    return { action: 'updated', rowNumber: foundRowNumber, tabName };
-  } else {
-    // Student not pre-populated in the sheet -> append as new row at the bottom
-    const newRow = [
-      formattedTime,
-      formattedDate,
-      record.nim,
-      record.name,
-      normalizeAngkatan(record.class_name),
-      record.status || 'Hadir',
-      record.notes || '-',
-      tercatatWIB,
-    ];
-
-    await appendRowToTab(sheetId, tabName, newRow);
-    return { action: 'appended', tabName };
+    await applyModelBDataRowStyles(sheetId, sheetNumericId, nextRowNum, 1, fullRow.length);
+    return { action: 'appended_matrix', tabName };
   }
 }
 
 /**
- * Pre-populate or full-sync the sheet with the master roster of students:
- * Supports side-by-side Day 1 (Cols B:J) and Day 2 (Cols L:T) tables!
- * Students who haven't checked in yet will show "Belum Hadir" with "-" time.
- * Students who have checked in will show their actual check-in time and status.
- * Dosen attendances will be populated in the "Dosen" tab.
- */
-export async function syncCategorizedWithMasterRoster(
-  sheetId: string,
-  allStudents: any[],
-  attendances: any[],
-  date: string,
-  lecturers: string[] = [],
-  dayOptions?: {
-    activeDay?: 1 | 2 | 'auto';
-    day1Date?: string;
-    day2Date?: string;
-  }
-) {
-  const day1Date = dayOptions?.day1Date || date;
-  const day2Date = dayOptions?.day2Date || getNextWIBDate(day1Date);
-  const activeDay =
-    dayOptions?.activeDay === 2 ||
-    (dayOptions?.activeDay === 'auto' && date >= day2Date) ||
-    date === day2Date
-      ? 2
-      : dayOptions?.activeDay === 1
-      ? 1
-      : date >= day2Date
-      ? 2
-      : 1;
-
-  // Map attendances into Day 1 and Day 2 sets
-  const attMapDay1 = new Map<string, any>();
-  const attMapDay2 = new Map<string, any>();
-
-  for (const att of attendances) {
-    const isDay2 =
-      att.attendance_date === day2Date ||
-      (att.attendance_date && att.attendance_date > day1Date);
-    const targetMap = isDay2 ? attMapDay2 : attMapDay1;
-
-    if (att.nim) targetMap.set(String(att.nim).trim().toUpperCase(), att);
-    if (att.name) targetMap.set(String(att.name).trim().toUpperCase(), att);
-  }
-
-  // 1. Group students by Angkatan
-  const groups: Record<string, any[]> = {};
-
-  for (const s of allStudents) {
-    const tabName = normalizeAngkatan(s.class_name);
-    if (!groups[tabName]) groups[tabName] = [];
-
-    const existingAttDay1 =
-      attMapDay1.get(String(s.nim).trim().toUpperCase()) ||
-      attMapDay1.get(String(s.name).trim().toUpperCase());
-    const existingAttDay2 =
-      attMapDay2.get(String(s.nim).trim().toUpperCase()) ||
-      attMapDay2.get(String(s.name).trim().toUpperCase());
-
-    groups[tabName].push({
-      nim: s.nim,
-      name: s.name,
-      class_name: s.class_name,
-      day1: {
-        attendance_date: day1Date,
-        check_in_time: existingAttDay1?.check_in_time
-          ? existingAttDay1.check_in_time.slice(0, 5) + ' WIB'
-          : '-',
-        status: existingAttDay1?.status || 'Belum Hadir',
-        notes: existingAttDay1?.notes || '-',
-        synced_at: existingAttDay1
-          ? new Date(existingAttDay1.created_at || Date.now()).toLocaleString('id-ID', {
-              timeZone: 'Asia/Jakarta',
-            }) + ' WIB'
-          : '-',
-      },
-      day2: {
-        attendance_date: day2Date,
-        check_in_time: existingAttDay2?.check_in_time
-          ? existingAttDay2.check_in_time.slice(0, 5) + ' WIB'
-          : '-',
-        status: existingAttDay2?.status || 'Belum Hadir',
-        notes: existingAttDay2?.notes || '-',
-        synced_at: existingAttDay2
-          ? new Date(existingAttDay2.created_at || Date.now()).toLocaleString('id-ID', {
-              timeZone: 'Asia/Jakarta',
-            }) + ' WIB'
-          : '-',
-      },
-    });
-  }
-
-  // 2. Pre-populate Dosen tab with all registered lecturers from master list
-  const dosenMapByNameDay1 = new Map<string, any>();
-  const dosenMapByNameDay2 = new Map<string, any>();
-
-  for (const att of attendances) {
-    const isDosen =
-      att.lecturer_name ||
-      (att.nim && String(att.nim).toUpperCase().startsWith('DOSEN')) ||
-      (att.class_name && String(att.class_name).toLowerCase().includes('dosen'));
-
-    if (isDosen && att.name) {
-      const isDay2 =
-        att.attendance_date === day2Date ||
-        (att.attendance_date && att.attendance_date > day1Date);
-      if (isDay2) {
-        dosenMapByNameDay2.set(String(att.name).trim().toUpperCase(), att);
-      } else {
-        dosenMapByNameDay1.set(String(att.name).trim().toUpperCase(), att);
-      }
-    }
-  }
-
-  const dosenList: any[] = [];
-  const processedDosenNames = new Set<string>();
-
-  // Pre-populate each registered lecturer
-  for (let idx = 0; idx < lecturers.length; idx++) {
-    const docName = lecturers[idx].trim();
-    processedDosenNames.add(docName.toUpperCase());
-
-    const attDay1 = dosenMapByNameDay1.get(docName.toUpperCase());
-    const attDay2 = dosenMapByNameDay2.get(docName.toUpperCase());
-    const docNip =
-      attDay1?.nim || attDay2?.nim || `DOSEN-${String(idx + 1).padStart(2, '0')}`;
-
-    dosenList.push({
-      nim: docNip,
-      name: docName,
-      class_name: 'Dosen',
-      day1: {
-        attendance_date: day1Date,
-        check_in_time: attDay1?.check_in_time
-          ? attDay1.check_in_time.slice(0, 5) + ' WIB'
-          : '-',
-        status: attDay1?.status || 'Belum Hadir',
-        notes: attDay1?.notes || '-',
-        synced_at: attDay1
-          ? new Date(attDay1.created_at || Date.now()).toLocaleString('id-ID', {
-              timeZone: 'Asia/Jakarta',
-            }) + ' WIB'
-          : '-',
-      },
-      day2: {
-        attendance_date: day2Date,
-        check_in_time: attDay2?.check_in_time
-          ? attDay2.check_in_time.slice(0, 5) + ' WIB'
-          : '-',
-        status: attDay2?.status || 'Belum Hadir',
-        notes: attDay2?.notes || '-',
-        synced_at: attDay2
-          ? new Date(attDay2.created_at || Date.now()).toLocaleString('id-ID', {
-              timeZone: 'Asia/Jakarta',
-            }) + ' WIB'
-          : '-',
-      },
-    });
-  }
-
-  // Include any other Dosen who attended but wasn't in master list
-  for (const att of attendances) {
-    const isDosen =
-      att.lecturer_name ||
-      (att.nim && String(att.nim).toUpperCase().startsWith('DOSEN')) ||
-      (att.class_name && String(att.class_name).toLowerCase().includes('dosen'));
-
-    if (
-      isDosen &&
-      att.name &&
-      !processedDosenNames.has(String(att.name).trim().toUpperCase())
-    ) {
-      processedDosenNames.add(String(att.name).trim().toUpperCase());
-      const isDay2 =
-        att.attendance_date === day2Date ||
-        (att.attendance_date && att.attendance_date > day1Date);
-
-      dosenList.push({
-        nim: att.nim,
-        name: att.name,
-        class_name: 'Dosen',
-        day1: {
-          attendance_date: day1Date,
-          check_in_time: !isDay2 && att.check_in_time
-            ? att.check_in_time.slice(0, 5) + ' WIB'
-            : '-',
-          status: !isDay2 ? att.status || 'Hadir' : 'Belum Hadir',
-          notes: !isDay2 ? att.notes || '-' : '-',
-          synced_at: !isDay2
-            ? new Date(att.created_at || Date.now()).toLocaleString('id-ID', {
-                timeZone: 'Asia/Jakarta',
-              }) + ' WIB'
-            : '-',
-        },
-        day2: {
-          attendance_date: day2Date,
-          check_in_time: isDay2 && att.check_in_time
-            ? att.check_in_time.slice(0, 5) + ' WIB'
-            : '-',
-          status: isDay2 ? att.status || 'Hadir' : 'Belum Hadir',
-          notes: isDay2 ? att.notes || '-' : '-',
-          synced_at: isDay2
-            ? new Date(att.created_at || Date.now()).toLocaleString('id-ID', {
-                timeZone: 'Asia/Jakarta',
-              }) + ' WIB'
-            : '-',
-        },
-      });
-    }
-  }
-
-  if (dosenList.length > 0) {
-    groups['Dosen'] = dosenList;
-  }
-
-  // Should Day 2 table be populated? (if Day 2 is active or has attendees or setting is 2)
-  const shouldPopulateDay2 =
-    activeDay === 2 || attMapDay2.size > 0 || dayOptions?.activeDay === 2;
-
-  // 3. Write each tab concurrently for maximum speed
-  const results = await Promise.all(
-    Object.entries(groups).map(async ([tabName, items]) => {
-      // Sort by NIM
-      items.sort((a, b) => String(a.nim).localeCompare(String(b.nim)));
-
-      const { sheetNumericId } = await ensureSheetTab(sheetId, tabName);
-
-      // 3a. Write Day 1 data (Cols B to J)
-      const day1Rows = items.map((item) => [
-        item.day1.check_in_time,
-        item.day1.attendance_date,
-        item.nim,
-        item.name,
-        normalizeAngkatan(item.class_name),
-        item.day1.status,
-        item.day1.notes,
-        item.day1.synced_at,
-      ]);
-
-      await clearAndRewriteTab(sheetId, tabName, day1Rows, 'B', 'J');
-
-      // 3b. If Day 2 is active or has check-ins, also write Day 2 side-by-side (Cols L to T)
-      if (shouldPopulateDay2) {
-        await ensureDay2Headers(sheetId, sheetNumericId, tabName);
-
-        const day2Rows = items.map((item) => [
-          item.day2.check_in_time,
-          item.day2.attendance_date,
-          item.nim,
-          item.name,
-          normalizeAngkatan(item.class_name),
-          item.day2.status,
-          item.day2.notes,
-          item.day2.synced_at,
-        ]);
-
-        await clearAndRewriteTab(sheetId, tabName, day2Rows, 'L', 'T');
-      }
-
-      return { tabName, count: items.length, day2Generated: shouldPopulateDay2 };
-    })
-  );
-
-  return results;
-}
-
-/**
- * Synchronize attendance records categorized automatically into separate tabs:
- * - Dosen -> Tab "Dosen"
- * - Mahasiswa Angkatan 25 -> Tab "Angkatan 25"
- * - Mahasiswa Angkatan 26 -> Tab "Angkatan 26"
- * etc.
- */
-export async function syncCategorizedAttendances(sheetId: string, attendances: any[]) {
-  const groups: Record<string, any[]> = {};
-
-  for (const att of attendances) {
-    const tabName = getTargetTabName(att);
-    if (!groups[tabName]) {
-      groups[tabName] = [];
-    }
-    groups[tabName].push(att);
-  }
-
-  const results: { tabName: string; count: number }[] = [];
-
-  for (const [tabName, groupItems] of Object.entries(groups)) {
-    const dataRows = groupItems.map((item) => [
-      item.check_in_time ? item.check_in_time.slice(0, 5) + ' WIB' : '-',
-      item.attendance_date || '-',
-      item.nim || '-',
-      item.name || '-',
-      normalizeAngkatan(item.class_name),
-      item.status || 'Hadir',
-      item.notes || '-',
-      new Date().toLocaleString('id-ID'),
-    ]);
-
-    await clearAndRewriteTab(sheetId, tabName, dataRows, 'B', 'J');
-    results.push({ tabName, count: dataRows.length });
-  }
-
-  return results;
-}
-
-/**
- * Resets a student's row in Google Sheets back to "Belum Hadir" with "-" check-in time.
- * Supports resetting Day 1 (Cols C:J) or Day 2 (Cols M:T).
+ * Resets a student's day cell in Model B Matrix Table back to "-"
+ * and decrements their Total Hadir count.
  */
 export async function resetAttendanceInSheet(
   sheetId: string,
@@ -1500,21 +770,26 @@ export async function resetAttendanceInSheet(
     class_name: string;
     attendance_date?: string;
   },
-  day: 1 | 2 = 1
+  day: number = 1,
+  days: DayConfigItem[] = getDaysList()
 ) {
+  const normalizedDays = days && days.length > 0 ? days : getDaysList();
   const requestedTabName = getTargetTabName(record);
-  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(sheetId, requestedTabName);
+  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(
+    sheetId,
+    requestedTabName,
+    normalizedDays
+  );
 
   const auth = getAuthClient();
   const sheets = google.sheets({ version: 'v4', auth });
 
-  // 1. Fetch column E (NIM) and column F (Nama) from row 1 to bottom
-  const colEF = await sheets.spreadsheets.values.get({
+  const colCD = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `'${tabName}'!E:F`,
+    range: `'${tabName}'!C:D`,
   });
 
-  const rowValues = colEF.data.values || [];
+  const rowValues = colCD.data.values || [];
   const targetNim = String(record.nim || '').trim().toUpperCase();
   const targetName = String(record.name || '').trim().toUpperCase();
 
@@ -1529,67 +804,223 @@ export async function resetAttendanceInSheet(
     }
   }
 
-  // If not found in E:F and day === 2, check column O:P (Day 2 NIM and Nama)
-  if (foundRowNumber === -1 && day === 2) {
-    const colOP = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: `'${tabName}'!O:P`,
-    });
-    const rowValuesDay2 = colOP.data.values || [];
-    for (let i = 0; i < rowValuesDay2.length; i++) {
-      const rowNim = String(rowValuesDay2[i]?.[0] || '').trim().toUpperCase();
-      const rowName = String(rowValuesDay2[i]?.[1] || '').trim().toUpperCase();
-
-      if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
-        foundRowNumber = i + 1;
-        break;
-      }
-    }
-  }
-
   if (foundRowNumber !== -1) {
-    if (day === 2) {
-      // Reset Day 2 columns M to T
-      // M: Waktu Masuk, N: Tanggal, O: NIM, P: Nama, Q: Angkatan, R: Status, S: Catatan, T: Tercatat Pada
-      const resetValues = [
-        '-',
-        record.attendance_date || '-',
-        record.nim,
-        record.name,
-        normalizeAngkatan(record.class_name),
-        'Belum Hadir',
-        '-',
-        '-',
-      ];
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: `'${tabName}'!M${foundRowNumber}:T${foundRowNumber}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [resetValues] },
-      });
-      await applyDay2DataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1);
-    } else {
-      // Reset Day 1 columns C to J
-      const resetValues = [
-        '-',
-        record.attendance_date || '-',
-        record.nim,
-        record.name,
-        normalizeAngkatan(record.class_name),
-        'Belum Hadir',
-        '-',
-        '-',
-      ];
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: `'${tabName}'!C${foundRowNumber}:J${foundRowNumber}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [resetValues] },
-      });
-      await applyDataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1);
-    }
+    const dayIndex = day > 0 ? day : 1;
+    const dayColLetter = getColumnLetter(4 + dayIndex);
+
+    // Reset this day's cell to "-"
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${dayColLetter}${foundRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [['-']],
+      },
+    });
+
+    // Recompute Total Hadir
+    const firstDayLetter = getColumnLetter(5);
+    const lastDayLetter = getColumnLetter(4 + normalizedDays.length);
+    const dayCells = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${firstDayLetter}${foundRowNumber}:${lastDayLetter}${foundRowNumber}`,
+    });
+
+    const values = dayCells.data.values?.[0] || [];
+    let attendedCount = 0;
+    values.forEach((val: string) => {
+      const s = String(val || '').trim();
+      if (s && s !== '-' && s !== 'Belum Hadir') attendedCount++;
+    });
+
+    const totalHadirColLetter = getColumnLetter(4 + normalizedDays.length + 1);
+    const totalHadirText = `${attendedCount} / ${normalizedDays.length} Hari`;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!${totalHadirColLetter}${foundRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[totalHadirText]],
+      },
+    });
+
     return { success: true, rowNumber: foundRowNumber };
   }
 
   return { success: false, notFound: true };
+}
+
+/**
+ * Pre-populates or synchronizes the entire roster into Model B Matrix Table:
+ * [No, NIM / NIP, Nama Lengkap, Angkatan, Hari 1, Hari 2, ..., Total Hadir, Catatan, Sync]
+ */
+export async function syncCategorizedWithMasterRoster(
+  sheetId: string,
+  allStudents: any[],
+  attendances: any[],
+  date: string,
+  lecturers: string[] = [],
+  dayOptions?: {
+    days?: DayConfigItem[];
+    activeDay?: number | 'auto';
+  }
+) {
+  const normalizedDays =
+    dayOptions?.days && dayOptions.days.length > 0
+      ? dayOptions.days
+      : getDaysList();
+
+  // Map attendances: key is `${nim}_${date}` and `${name}_${date}`
+  const attMap = new Map<string, any>();
+  for (const att of attendances) {
+    const attDate = att.attendance_date || date;
+    if (att.nim) attMap.set(`${String(att.nim).trim().toUpperCase()}_${attDate}`, att);
+    if (att.name) attMap.set(`${String(att.name).trim().toUpperCase()}_${attDate}`, att);
+  }
+
+  // 1. Group students by Angkatan
+  const groups: Record<string, any[]> = {};
+
+  for (const s of allStudents) {
+    const tabName = normalizeAngkatan(s.class_name);
+    if (!groups[tabName]) groups[tabName] = [];
+
+    const studentNim = String(s.nim || '').trim().toUpperCase();
+    const studentName = String(s.name || '').trim().toUpperCase();
+
+    let attendedCount = 0;
+    let latestNotes = '-';
+    let latestSync = '-';
+
+    const dayValues = normalizedDays.map((d) => {
+      const att =
+        attMap.get(`${studentNim}_${d.date}`) ||
+        attMap.get(`${studentName}_${d.date}`);
+
+      if (att) {
+        attendedCount++;
+        if (att.notes && att.notes !== '-') latestNotes = att.notes;
+        latestSync = new Date(att.created_at || Date.now()).toLocaleString('id-ID', {
+          timeZone: 'Asia/Jakarta',
+        }) + ' WIB';
+
+        const rawTime = (att.check_in_time || '').slice(0, 5);
+        return att.status === 'Hadir'
+          ? `Hadir (${rawTime} WIB)`
+          : att.status || 'Hadir';
+      }
+      return '-';
+    });
+
+    groups[tabName].push({
+      nim: s.nim,
+      name: s.name,
+      class_name: s.class_name,
+      dayValues,
+      totalHadir: `${attendedCount} / ${normalizedDays.length} Hari`,
+      notes: latestNotes,
+      synced_at: latestSync,
+    });
+  }
+
+  // 2. Pre-populate Dosen
+  const dosenList: any[] = [];
+  const processedDosenNames = new Set<string>();
+
+  for (let idx = 0; idx < lecturers.length; idx++) {
+    const docName = lecturers[idx].trim();
+    processedDosenNames.add(docName.toUpperCase());
+
+    let attendedCount = 0;
+    let latestNotes = '-';
+    let latestSync = '-';
+
+    const dayValues = normalizedDays.map((d) => {
+      const att = attMap.get(`${docName.toUpperCase()}_${d.date}`);
+      if (att) {
+        attendedCount++;
+        if (att.notes && att.notes !== '-') latestNotes = att.notes;
+        latestSync = new Date(att.created_at || Date.now()).toLocaleString('id-ID', {
+          timeZone: 'Asia/Jakarta',
+        }) + ' WIB';
+
+        const rawTime = (att.check_in_time || '').slice(0, 5);
+        return att.status === 'Hadir'
+          ? `Hadir (${rawTime} WIB)`
+          : att.status || 'Hadir';
+      }
+      return '-';
+    });
+
+    dosenList.push({
+      nim: `DOSEN-${String(idx + 1).padStart(2, '0')}`,
+      name: docName,
+      class_name: 'Dosen',
+      dayValues,
+      totalHadir: `${attendedCount} / ${normalizedDays.length} Hari`,
+      notes: latestNotes,
+      synced_at: latestSync,
+    });
+  }
+
+  if (dosenList.length > 0) {
+    groups['Dosen'] = dosenList;
+  }
+
+  // 3. Clear and rewrite each tab
+  const headers = buildModelBHeaders(normalizedDays);
+  const endColLetter = getColumnLetter(headers.length);
+
+  const results = await Promise.all(
+    Object.entries(groups).map(async ([tabName, items]) => {
+      items.sort((a, b) => String(a.nim).localeCompare(String(b.nim)));
+
+      const { sheetNumericId } = await ensureSheetTab(sheetId, tabName, normalizedDays);
+
+      const rows = items.map((item, idx) => [
+        idx + 1,
+        item.nim,
+        item.name,
+        normalizeAngkatan(item.class_name),
+        ...item.dayValues,
+        item.totalHadir,
+        item.notes,
+        item.synced_at,
+      ]);
+
+      const endRowNum = 4 + rows.length;
+
+      // Clear from B5 downwards to Z1000
+      try {
+        await sheets.spreadsheets.values.clear({
+          spreadsheetId: sheetId,
+          range: `'${tabName}'!B5:Z1000`,
+        });
+      } catch (e) {}
+
+      // Write data rows
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `'${tabName}'!B5:${endColLetter}${endRowNum}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: rows,
+        },
+      });
+
+      // Apply styling
+      await applyModelBDataRowStyles(
+        sheetId,
+        sheetNumericId,
+        5,
+        rows.length,
+        headers.length
+      );
+
+      return { tabName, count: rows.length };
+    })
+  );
+
+  return results;
 }

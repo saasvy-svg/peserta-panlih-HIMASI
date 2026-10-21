@@ -23,15 +23,22 @@ export interface Attendance {
   created_at: string;
 }
 
+export interface DayConfigItem {
+  dayNumber: number;
+  date: string;
+  label?: string;
+}
+
 export interface ExtraTexts {
   badge_text?: string;
   instruction_title?: string;
   instructions?: string[];
   lecturers?: string[];
   anti_titip_enabled?: boolean;
-  active_day?: 1 | 2 | 'auto';
+  active_day?: number | 'auto';
   day1_date?: string;
   day2_date?: string;
+  days?: DayConfigItem[];
   card1_title?: string;
   card1_desc?: string;
   card2_title?: string;

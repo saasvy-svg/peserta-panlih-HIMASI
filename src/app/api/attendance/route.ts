@@ -179,7 +179,8 @@ export async function POST(request: NextRequest) {
               status,
               notes: insertPayload.notes,
             },
-            activeDay
+            activeDay,
+            dayResolution.days
           );
         } catch (syncErr: any) {
           console.error('Realtime Google Sheets update error:', syncErr?.message || syncErr);

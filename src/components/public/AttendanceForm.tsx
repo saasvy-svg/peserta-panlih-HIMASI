@@ -377,7 +377,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
 
             <div className="flex justify-between border-b border-black/5 pb-2">
               <span className="text-[#6B7280]">Sesi Presensi</span>
-              <span className={`font-bold ${successReceipt.activeDay === 2 ? 'text-emerald-600' : 'text-[#2563EB]'}`}>
+              <span className={`font-bold ${successReceipt.activeDay && successReceipt.activeDay > 1 ? 'text-emerald-600' : 'text-[#2563EB]'}`}>
                 Hari ke-{successReceipt.activeDay || currentDay}
               </span>
             </div>
@@ -411,7 +411,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
                 <span>{formatDate(new Date())}</span>
               </div>
               <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                currentDay === 2
+                currentDay > 1
                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                   : 'bg-blue-100 text-blue-800 border border-blue-300'
               }`}>
@@ -608,7 +608,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
                 <span>{formatDate(new Date())}</span>
               </div>
               <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                currentDay === 2
+                currentDay > 1
                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                   : 'bg-blue-100 text-blue-800 border border-blue-300'
               }`}>
