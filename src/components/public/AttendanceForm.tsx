@@ -48,6 +48,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
   // Status & Submit
   const [status, setStatus] = useState<'Hadir' | 'Izin' | 'Sakit'>('Hadir');
   const [notes, setNotes] = useState('');
+  const [currentDay, setCurrentDay] = useState<number>(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [successReceipt, setSuccessReceipt] = useState<{
@@ -59,7 +60,18 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
     time: string;
     date: string;
     status: string;
+    activeDay?: number;
   } | null>(null);
+
+  // Fetch active day on initial mount
+  useEffect(() => {
+    fetch('/api/students/lookup')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.activeDay) setCurrentDay(d.activeDay);
+      })
+      .catch(() => {});
+  }, []);
 
   // Debounced auto-lookup when NIM changes (Mode Peserta)
   useEffect(() => {
@@ -91,6 +103,9 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
 
       if (res.ok && data.student) {
         setStudent(data.student);
+        if (data.activeDay) {
+          setCurrentDay(data.activeDay);
+        }
         if (data.existingAttendance) {
           setAlreadyCheckedIn({
             time: data.existingAttendance.check_in_time,
@@ -169,6 +184,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
           time: result.data?.check_in_time || new Date().toLocaleTimeString('id-ID'),
           date: formatDate(new Date()),
           status,
+          activeDay: result.activeDay || currentDay,
         });
         setAlreadyCheckedIn({
           time: result.data?.check_in_time || new Date().toLocaleTimeString('id-ID'),
@@ -244,6 +260,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
           time: result.data?.check_in_time || new Date().toLocaleTimeString('id-ID'),
           date: formatDate(new Date()),
           status,
+          activeDay: result.activeDay || currentDay,
         });
       } else {
         toast.error(result.error || 'Gagal mengirim presensi dosen.');
@@ -358,6 +375,13 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
               </span>
             </div>
 
+            <div className="flex justify-between border-b border-black/5 pb-2">
+              <span className="text-[#6B7280]">Sesi Presensi</span>
+              <span className={`font-bold ${successReceipt.activeDay === 2 ? 'text-emerald-600' : 'text-[#2563EB]'}`}>
+                Hari ke-{successReceipt.activeDay || currentDay}
+              </span>
+            </div>
+
             <div className="flex justify-between items-center pt-1">
               <span className="text-[#6B7280]">Status Kehadiran</span>
               <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 rounded-full font-bold text-xs">
@@ -381,9 +405,18 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
            ======================================================== */
         <form onSubmit={handleSubmitPeserta} className="space-y-5">
           <div className="border-b border-black/5 pb-4">
-            <div className="flex items-center gap-2 text-[#2563EB] font-semibold text-xs uppercase tracking-wider mb-1">
-              <CalendarDays size={14} />
-              <span>{formatDate(new Date())}</span>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-2 text-[#2563EB] font-semibold text-xs uppercase tracking-wider">
+                <CalendarDays size={14} />
+                <span>{formatDate(new Date())}</span>
+              </div>
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                currentDay === 2
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : 'bg-blue-100 text-blue-800 border border-blue-300'
+              }`}>
+                Hari ke-{currentDay}
+              </span>
             </div>
             <h2 className="text-xl font-bold text-[#111827]">
               Formulir Presensi Mahasiswa
@@ -569,9 +602,18 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
            ======================================================== */
         <form onSubmit={handleSubmitDosen} className="space-y-5">
           <div className="border-b border-black/5 pb-4">
-            <div className="flex items-center gap-2 text-[#2563EB] font-semibold text-xs uppercase tracking-wider mb-1">
-              <CalendarDays size={14} />
-              <span>{formatDate(new Date())}</span>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-2 text-[#2563EB] font-semibold text-xs uppercase tracking-wider">
+                <CalendarDays size={14} />
+                <span>{formatDate(new Date())}</span>
+              </div>
+              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                currentDay === 2
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : 'bg-blue-100 text-blue-800 border border-blue-300'
+              }`}>
+                Hari ke-{currentDay}
+              </span>
             </div>
             <h2 className="text-xl font-bold text-[#111827]">
               Formulir Presensi Dosen

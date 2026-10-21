@@ -2,13 +2,29 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/utils/supabase/admin';
 import { normalizeAngkatan } from '@/utils/angkatan';
 import { getWIBDate } from '@/lib/utils';
+import { resolveActiveDay } from '@/lib/dayHelper';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const rawNim = searchParams.get('nim');
 
   if (!rawNim) {
-    return NextResponse.json({ error: 'NIM wajib disertakan' }, { status: 400 });
+    // Return active day info if no NIM provided
+    let extraTexts: any = null;
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
+      extraTexts = landingData?.extra_texts || null;
+    } catch (e) {}
+
+    const dayResolution = resolveActiveDay(extraTexts);
+    return NextResponse.json({
+      activeDay: dayResolution.activeDay,
+      day1Date: dayResolution.day1Date,
+      day2Date: dayResolution.day2Date,
+    });
   }
 
   const nim = rawNim.trim();
@@ -30,14 +46,27 @@ export async function GET(request: NextRequest) {
       }, { status: 404 });
     }
 
-    // 2. Cek apakah sudah absen hari ini
-    const today = getWIBDate();
+    // Ambil setting sesi aktif (Hari 1 atau Hari 2)
+    let extraTexts: any = null;
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
+      extraTexts = landingData?.extra_texts || null;
+    } catch (e) {}
+
+    const dayResolution = resolveActiveDay(extraTexts);
+    const activeDay = dayResolution.activeDay;
+    const targetDate = dayResolution.effectiveDate;
+
+    // 2. Cek apakah sudah absen pada sesi hari ini
     const { data: attendance } = await supabase
       .from('attendances')
       .select('id, check_in_time, status')
       .eq('nim', student.nim)
-      .eq('attendance_date', today)
-      .single();
+      .eq('attendance_date', targetDate)
+      .maybeSingle();
 
     return NextResponse.json({
       student: {
@@ -46,6 +75,8 @@ export async function GET(request: NextRequest) {
         name: student.name,
         class_name: normalizeAngkatan(student.class_name),
       },
+      activeDay,
+      attendanceDate: targetDate,
       existingAttendance: attendance || null,
     });
   } catch (err: any) {

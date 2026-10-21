@@ -3,6 +3,7 @@ import { createAdminClient } from '@/utils/supabase/admin';
 import { updateOrAppendAttendanceInSheet } from '@/lib/googleSheets';
 import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
 import { getWIBDate, getWIBTime } from '@/lib/utils';
+import { resolveActiveDay } from '@/lib/dayHelper';
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for');
@@ -42,16 +43,30 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createAdminClient();
-    const today = getWIBDate();
     const nowTime = getWIBTime(); // HH:MM:SS format WIB (Asia/Jakarta)
     const clientIp = getClientIp(request);
     const isAdminOverride = Boolean(admin_override);
 
-    // 1. Cek apakah NIM sudah presensi hari ini
+    // 0. Ambil konfigurasi landing settings (Anti-Titip dan Sesi Hari 1 / Hari 2)
+    let extraTexts: any = null;
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
+      extraTexts = landingData?.extra_texts || null;
+    } catch (e) {}
+
+    // Tentukan sesi presensi aktif (Hari 1 atau Hari 2)
+    const dayResolution = resolveActiveDay(extraTexts);
+    const activeDay = dayResolution.activeDay; // 1 | 2
+    const attendanceDate = dayResolution.effectiveDate; // YYYY-MM-DD
+
+    // 1. Cek apakah NIM sudah presensi pada sesi hari ini
     let query = supabase
       .from('attendances')
       .select('id, check_in_time, status')
-      .eq('attendance_date', today);
+      .eq('attendance_date', attendanceDate);
 
     if (nim.startsWith('DOSEN')) {
       query = query.eq('name', name);
@@ -64,7 +79,7 @@ export async function POST(request: NextRequest) {
     if (existing) {
       return NextResponse.json(
         {
-          error: `Anda sudah tercatat presensi hari ini pada pk ${existing.check_in_time.slice(0, 5)} WIB (${existing.status}).`,
+          error: `Anda sudah tercatat presensi Hari ke-${activeDay} pada pk ${existing.check_in_time.slice(0, 5)} WIB (${existing.status}).`,
           existing,
         },
         { status: 409 }
@@ -72,17 +87,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. Proteksi Anti-Titip Absen: Cek saklar pengaturan
-    let isAntiTitipEnabled = true;
-    try {
-      const { data: landingData } = await supabase
-        .from('landing_settings')
-        .select('extra_texts')
-        .maybeSingle();
-
-      if (landingData?.extra_texts && typeof landingData.extra_texts.anti_titip_enabled === 'boolean') {
-        isAntiTitipEnabled = landingData.extra_texts.anti_titip_enabled;
-      }
-    } catch (e) {}
+    const isAntiTitipEnabled = extraTexts?.anti_titip_enabled !== false;
 
     // Bypassed jika saklar dinonaktifkan, atau diabsenkan langsung oleh Admin, atau untuk Dosen
     if (isAntiTitipEnabled && !isAdminOverride && !nim.startsWith('DOSEN')) {
@@ -91,14 +96,14 @@ export async function POST(request: NextRequest) {
         const { data: duplicateDevice } = await supabase
           .from('attendances')
           .select('id, name, nim, check_in_time')
-          .eq('attendance_date', today)
+          .eq('attendance_date', attendanceDate)
           .eq('device_info', clientIp)
           .maybeSingle();
 
         if (duplicateDevice) {
           return NextResponse.json(
             {
-              error: `Perangkat / HP ini sudah digunakan untuk presensi hari ini oleh: ${duplicateDevice.name} (${duplicateDevice.nim}) pada pk ${duplicateDevice.check_in_time.slice(0, 5)} WIB. Demi ketertiban (anti-titip absen), 1 HP hanya boleh absen 1 kali. Jika HP Anda terkendala, silakan melapor ke Admin/Dosen untuk diabsenkan manual.`,
+              error: `Perangkat / HP ini sudah digunakan untuk presensi Hari ke-${activeDay} oleh: ${duplicateDevice.name} (${duplicateDevice.nim}) pada pk ${duplicateDevice.check_in_time.slice(0, 5)} WIB. Demi ketertiban (anti-titip absen), 1 HP hanya boleh absen 1 kali. Jika HP Anda terkendala, silakan melapor ke Admin/Dosen untuk diabsenkan manual.`,
               code: 'DEVICE_IP_LIMIT_EXCEEDED',
             },
             { status: 403 }
@@ -113,10 +118,10 @@ export async function POST(request: NextRequest) {
       nim,
       name,
       class_name: normalizeAngkatan(class_name),
-      attendance_date: today,
+      attendance_date: attendanceDate,
       check_in_time: nowTime,
       status,
-      notes: notes || (isAdminOverride ? 'Diabsenkan oleh Admin (Kendala HP/Perangkat)' : null),
+      notes: notes || (isAdminOverride ? `Diabsenkan oleh Admin (Kendala HP/Perangkat)` : null),
       device_info: isAdminOverride ? 'ADMIN_OVERRIDE' : clientIp,
     };
 
@@ -150,7 +155,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 4. Integrasi Realtime Google Sheets (In-Place Update jika sudah pre-populated atau Append jika belum)
+    // 4. Integrasi Realtime Google Sheets (Hari 1 di Kolom B:J, Hari 2 otomatis di Kolom L:T tanpa menimpa Hari 1)
     try {
       const { data: config } = await supabase
         .from('sheet_configs')
@@ -160,16 +165,20 @@ export async function POST(request: NextRequest) {
 
       if (config && config.sheet_id && config.sync_mode !== 'manual_only') {
         try {
-          await updateOrAppendAttendanceInSheet(config.sheet_id, {
-            nim,
-            name,
-            class_name,
-            lecturer_name,
-            attendance_date: today,
-            check_in_time: nowTime,
-            status,
-            notes: insertPayload.notes,
-          });
+          await updateOrAppendAttendanceInSheet(
+            config.sheet_id,
+            {
+              nim,
+              name,
+              class_name,
+              lecturer_name,
+              attendance_date: attendanceDate,
+              check_in_time: nowTime,
+              status,
+              notes: insertPayload.notes,
+            },
+            activeDay
+          );
         } catch (syncErr: any) {
           console.error('Realtime Google Sheets update error:', syncErr?.message || syncErr);
         }
@@ -180,9 +189,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      activeDay,
       message: isAdminOverride
-        ? `Presensi mahasiswa ${name} berhasil dicatat oleh Admin!`
-        : 'Presensi berhasil dicatat!',
+        ? `Presensi ${name} (Hari ke-${activeDay}) berhasil dicatat oleh Admin!`
+        : `Presensi Hari ke-${activeDay} berhasil dicatat!`,
       data: newRecord,
     });
   } catch (error: any) {
@@ -193,7 +203,7 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const date = searchParams.get('date') || new Date().toISOString().split('T')[0];
+  const date = searchParams.get('date') || getWIBDate();
   const className = searchParams.get('class');
   const status = searchParams.get('status');
 

@@ -29,6 +29,9 @@ export interface ExtraTexts {
   instructions?: string[];
   lecturers?: string[];
   anti_titip_enabled?: boolean;
+  active_day?: 1 | 2 | 'auto';
+  day1_date?: string;
+  day2_date?: string;
   card1_title?: string;
   card1_desc?: string;
   card2_title?: string;
