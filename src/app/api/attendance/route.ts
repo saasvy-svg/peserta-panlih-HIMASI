@@ -4,6 +4,7 @@ import { updateOrAppendAttendanceInSheet } from '@/lib/googleSheets';
 import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
 import { getWIBDate, getWIBTime } from '@/lib/utils';
 import { resolveActiveDay } from '@/lib/dayHelper';
+import { checkAttendanceTimeLock } from '@/lib/timeLock';
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for');
@@ -63,6 +64,21 @@ export async function POST(request: NextRequest) {
     const dayResolution = resolveActiveDay(extraTexts, customAttendanceDate);
     const activeDay = customDay ? (Number(customDay) as 1 | 2) : dayResolution.activeDay; // 1 | 2
     const attendanceDate = customAttendanceDate || dayResolution.effectiveDate; // YYYY-MM-DD
+
+    // 0.1 Cek Pembatasan Jam Presensi (Time Lock)
+    if (!isAdminOverride) {
+      const timeLock = checkAttendanceTimeLock(extraTexts);
+      if (!timeLock.isOpen) {
+        return NextResponse.json(
+          {
+            error: timeLock.message,
+            code: 'TIME_LOCK_ENFORCED',
+            timeLock,
+          },
+          { status: 403 }
+        );
+      }
+    }
 
     // 1. Cek apakah NIM sudah presensi pada sesi hari ini
     let query = supabase

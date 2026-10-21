@@ -29,6 +29,29 @@ export interface DayConfigItem {
   label?: string;
 }
 
+export interface VotingRecord {
+  has_voted: boolean;
+  voted_at?: string;
+  notes?: string;
+}
+
+export interface QuickCountCandidate {
+  id: string;
+  number: string;
+  name: string;
+  tagline?: string;
+  photo_url?: string;
+  votes: number;
+}
+
+export interface QuickCountConfig {
+  is_locked?: boolean;
+  invalid_votes?: number;
+  notes?: string;
+  candidates?: QuickCountCandidate[];
+  updated_at?: string;
+}
+
 export interface ExtraTexts {
   badge_text?: string;
   instruction_title?: string;
@@ -39,6 +62,12 @@ export interface ExtraTexts {
   day1_date?: string;
   day2_date?: string;
   days?: DayConfigItem[];
+  time_lock_enabled?: boolean;
+  open_time?: string;
+  close_time?: string;
+  time_lock_message?: string;
+  voting_records?: Record<string, VotingRecord>;
+  quick_count?: QuickCountConfig;
   card1_title?: string;
   card1_desc?: string;
   card2_title?: string;

@@ -49,6 +49,13 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
   const [status, setStatus] = useState<'Hadir' | 'Izin' | 'Sakit'>('Hadir');
   const [notes, setNotes] = useState('');
   const [currentDay, setCurrentDay] = useState<number>(1);
+  const [timeLock, setTimeLock] = useState<{
+    enabled: boolean;
+    isOpen: boolean;
+    openTime: string;
+    closeTime: string;
+    message: string;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [successReceipt, setSuccessReceipt] = useState<{
@@ -63,12 +70,13 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
     activeDay?: number;
   } | null>(null);
 
-  // Fetch active day on initial mount
+  // Fetch active day & time lock on initial mount
   useEffect(() => {
     fetch('/api/students/lookup')
       .then((r) => r.json())
       .then((d) => {
         if (d.activeDay) setCurrentDay(d.activeDay);
+        if (d.timeLock) setTimeLock(d.timeLock);
       })
       .catch(() => {});
   }, []);
@@ -106,6 +114,9 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
         if (data.activeDay) {
           setCurrentDay(data.activeDay);
         }
+        if (data.timeLock) {
+          setTimeLock(data.timeLock);
+        }
         if (data.existingAttendance) {
           setAlreadyCheckedIn({
             time: data.existingAttendance.check_in_time,
@@ -132,6 +143,10 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
     }
     if (alreadyCheckedIn) {
       toast.warning('Anda sudah melakukan absensi hari ini!');
+      return;
+    }
+    if (timeLock?.enabled && !timeLock.isOpen) {
+      toast.error(timeLock.message);
       return;
     }
 
@@ -207,6 +222,10 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
     e.preventDefault();
     if (!selectedLecturer) {
       toast.error('Pilih nama dosen terlebih dahulu.');
+      return;
+    }
+    if (timeLock?.enabled && !timeLock.isOpen) {
+      toast.error(timeLock.message);
       return;
     }
 
@@ -426,6 +445,17 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
             </p>
           </div>
 
+          {/* TIME LOCK BANNER IF CLOSED */}
+          {timeLock?.enabled && !timeLock.isOpen && (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5 animate-in fade-in duration-200">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="leading-relaxed">
+                <span className="font-bold block mb-0.5">Sesi Presensi Belum / Sudah Ditutup:</span>
+                {timeLock.message}
+              </div>
+            </div>
+          )}
+
           {/* NIM INPUT */}
           <div>
             <label className="block text-xs font-semibold text-[#374151] mb-1.5">
@@ -571,9 +601,9 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
           {/* SUBMIT BUTTON */}
           <button
             type="submit"
-            disabled={!student || isSubmitting || !!alreadyCheckedIn}
+            disabled={!student || isSubmitting || !!alreadyCheckedIn || (timeLock?.enabled && !timeLock.isOpen)}
             className={`w-full py-3 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-sm transition-all ${
-              !student || alreadyCheckedIn
+              !student || alreadyCheckedIn || (timeLock?.enabled && !timeLock.isOpen)
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 : 'bg-[#2563EB] hover:bg-[#1D4ED8] text-white active:scale-[0.99] cursor-pointer'
             }`}
@@ -582,6 +612,11 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
               <>
                 <Loader2 size={18} className="animate-spin" />
                 <span>Mencatat Presensi...</span>
+              </>
+            ) : timeLock?.enabled && !timeLock.isOpen ? (
+              <>
+                <Clock size={18} />
+                <span>Presensi Sedang Ditutup</span>
               </>
             ) : alreadyCheckedIn ? (
               <>
@@ -622,6 +657,17 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
               Pilih nama Anda pada dropdown di bawah ini untuk mencatat kehadiran resmi.
             </p>
           </div>
+
+          {/* TIME LOCK BANNER IF CLOSED */}
+          {timeLock?.enabled && !timeLock.isOpen && (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5 animate-in fade-in duration-200">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="leading-relaxed">
+                <span className="font-bold block mb-0.5">Sesi Presensi Belum / Sudah Ditutup:</span>
+                {timeLock.message}
+              </div>
+            </div>
+          )}
 
           {/* DROPDOWN NAMA DOSEN */}
           <div>
@@ -734,9 +780,9 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
           {/* SUBMIT BUTTON DOSEN */}
           <button
             type="submit"
-            disabled={!selectedLecturer || isSubmitting}
+            disabled={!selectedLecturer || isSubmitting || (timeLock?.enabled && !timeLock.isOpen)}
             className={`w-full py-3 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-sm transition-all ${
-              !selectedLecturer
+              !selectedLecturer || (timeLock?.enabled && !timeLock.isOpen)
                 ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
                 : 'bg-[#2563EB] hover:bg-[#1D4ED8] text-white active:scale-[0.99] cursor-pointer'
             }`}
@@ -745,6 +791,11 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
               <>
                 <Loader2 size={18} className="animate-spin" />
                 <span>Mencatat Presensi Dosen...</span>
+              </>
+            ) : timeLock?.enabled && !timeLock.isOpen ? (
+              <>
+                <Clock size={18} />
+                <span>Presensi Sedang Ditutup</span>
               </>
             ) : (
               <>

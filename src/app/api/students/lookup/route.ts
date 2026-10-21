@@ -3,6 +3,7 @@ import { createAdminClient } from '@/utils/supabase/admin';
 import { normalizeAngkatan } from '@/utils/angkatan';
 import { getWIBDate } from '@/lib/utils';
 import { resolveActiveDay } from '@/lib/dayHelper';
+import { checkAttendanceTimeLock } from '@/lib/timeLock';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -20,10 +21,12 @@ export async function GET(request: NextRequest) {
     } catch (e) {}
 
     const dayResolution = resolveActiveDay(extraTexts);
+    const timeLock = checkAttendanceTimeLock(extraTexts);
     return NextResponse.json({
       activeDay: dayResolution.activeDay,
       day1Date: dayResolution.day1Date,
       day2Date: dayResolution.day2Date,
+      timeLock,
     });
   }
 
@@ -77,6 +80,7 @@ export async function GET(request: NextRequest) {
       },
       activeDay,
       attendanceDate: targetDate,
+      timeLock: checkAttendanceTimeLock(extraTexts),
       existingAttendance: attendance || null,
     });
   } catch (err: any) {
