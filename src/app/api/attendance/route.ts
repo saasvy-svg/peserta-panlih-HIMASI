@@ -33,6 +33,8 @@ export async function POST(request: NextRequest) {
       status = 'Hadir',
       notes,
       admin_override = false,
+      attendance_date: customAttendanceDate,
+      day: customDay,
     } = body;
 
     if (!nim || !name || !class_name) {
@@ -58,9 +60,9 @@ export async function POST(request: NextRequest) {
     } catch (e) {}
 
     // Tentukan sesi presensi aktif (Hari 1 atau Hari 2)
-    const dayResolution = resolveActiveDay(extraTexts);
-    const activeDay = dayResolution.activeDay; // 1 | 2
-    const attendanceDate = dayResolution.effectiveDate; // YYYY-MM-DD
+    const dayResolution = resolveActiveDay(extraTexts, customAttendanceDate);
+    const activeDay = customDay ? (Number(customDay) as 1 | 2) : dayResolution.activeDay; // 1 | 2
+    const attendanceDate = customAttendanceDate || dayResolution.effectiveDate; // YYYY-MM-DD
 
     // 1. Cek apakah NIM sudah presensi pada sesi hari ini
     let query = supabase
