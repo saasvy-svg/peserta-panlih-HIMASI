@@ -1487,3 +1487,109 @@ export async function syncCategorizedAttendances(sheetId: string, attendances: a
 
   return results;
 }
+
+/**
+ * Resets a student's row in Google Sheets back to "Belum Hadir" with "-" check-in time.
+ * Supports resetting Day 1 (Cols C:J) or Day 2 (Cols M:T).
+ */
+export async function resetAttendanceInSheet(
+  sheetId: string,
+  record: {
+    nim: string;
+    name: string;
+    class_name: string;
+    attendance_date?: string;
+  },
+  day: 1 | 2 = 1
+) {
+  const requestedTabName = getTargetTabName(record);
+  const { title: tabName, numericId: sheetNumericId } = await getExistingTabTitle(sheetId, requestedTabName);
+
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  // 1. Fetch column E (NIM) and column F (Nama) from row 1 to bottom
+  const colEF = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: `'${tabName}'!E:F`,
+  });
+
+  const rowValues = colEF.data.values || [];
+  const targetNim = String(record.nim || '').trim().toUpperCase();
+  const targetName = String(record.name || '').trim().toUpperCase();
+
+  let foundRowNumber = -1;
+  for (let i = 0; i < rowValues.length; i++) {
+    const rowNim = String(rowValues[i]?.[0] || '').trim().toUpperCase();
+    const rowName = String(rowValues[i]?.[1] || '').trim().toUpperCase();
+
+    if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
+      foundRowNumber = i + 1;
+      break;
+    }
+  }
+
+  // If not found in E:F and day === 2, check column O:P (Day 2 NIM and Nama)
+  if (foundRowNumber === -1 && day === 2) {
+    const colOP = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!O:P`,
+    });
+    const rowValuesDay2 = colOP.data.values || [];
+    for (let i = 0; i < rowValuesDay2.length; i++) {
+      const rowNim = String(rowValuesDay2[i]?.[0] || '').trim().toUpperCase();
+      const rowName = String(rowValuesDay2[i]?.[1] || '').trim().toUpperCase();
+
+      if ((targetNim && rowNim === targetNim) || (targetName && rowName === targetName)) {
+        foundRowNumber = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (foundRowNumber !== -1) {
+    if (day === 2) {
+      // Reset Day 2 columns M to T
+      // M: Waktu Masuk, N: Tanggal, O: NIM, P: Nama, Q: Angkatan, R: Status, S: Catatan, T: Tercatat Pada
+      const resetValues = [
+        '-',
+        record.attendance_date || '-',
+        record.nim,
+        record.name,
+        normalizeAngkatan(record.class_name),
+        'Belum Hadir',
+        '-',
+        '-',
+      ];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `'${tabName}'!M${foundRowNumber}:T${foundRowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [resetValues] },
+      });
+      await applyDay2DataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1);
+    } else {
+      // Reset Day 1 columns C to J
+      const resetValues = [
+        '-',
+        record.attendance_date || '-',
+        record.nim,
+        record.name,
+        normalizeAngkatan(record.class_name),
+        'Belum Hadir',
+        '-',
+        '-',
+      ];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `'${tabName}'!C${foundRowNumber}:J${foundRowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [resetValues] },
+      });
+      await applyDataRowStyles(sheetId, sheetNumericId, foundRowNumber, 1);
+    }
+    return { success: true, rowNumber: foundRowNumber };
+  }
+
+  return { success: false, notFound: true };
+}
