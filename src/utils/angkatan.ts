@@ -11,24 +11,28 @@ export function normalizeAngkatan(input?: string | null): string {
     return 'Dosen';
   }
 
-  // Jika sudah bertuliskan "Angkatan XX"
+  // Jika sudah bertuliskan "Angkatan XX" atau "Angkatan 20XX"
   const alreadyAngkatan = trimmed.match(/^angkatan\s*(\d+)/i);
   if (alreadyAngkatan) {
-    return `Angkatan ${alreadyAngkatan[1]}`;
+    const raw = alreadyAngkatan[1];
+    const fullYear = raw.length === 2 ? `20${raw}` : raw;
+    return `Angkatan ${fullYear}`;
   }
 
   // Pola A25, B25, a25, b25, TI-25, 25, 2025 dsb.
   const batchMatch = trimmed.match(/^[a-zA-Z\-_/ ]*(\d{2,4})$/);
   if (batchMatch) {
     const raw = batchMatch[1];
-    const yearDigits = raw.length === 4 ? raw.slice(2) : raw;
-    return `Angkatan ${yearDigits}`;
+    const fullYear = raw.length === 2 ? `20${raw}` : raw;
+    return `Angkatan ${fullYear}`;
   }
 
-  // Cek apakah mengandung 2 digit angka (contoh: "Kelas 25", "TI 25")
-  const anyDigits = trimmed.match(/(\d{2})/);
+  // Cek apakah mengandung 2 atau 4 digit angka (contoh: "Kelas 25", "TI 25")
+  const anyDigits = trimmed.match(/(\d{2,4})/);
   if (anyDigits) {
-    return `Angkatan ${anyDigits[1]}`;
+    const raw = anyDigits[1];
+    const fullYear = raw.length === 2 ? `20${raw}` : raw;
+    return `Angkatan ${fullYear}`;
   }
 
   return trimmed;

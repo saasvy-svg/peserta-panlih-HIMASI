@@ -994,11 +994,11 @@ export async function syncCategorizedWithMasterRoster(
 
       const endRowNum = 4 + rows.length;
 
-      // Clear from B5 downwards to Z1000
+      // Clear from B5 downwards up to endColLetter (preserving side tables at L:P)
       try {
         await sheets.spreadsheets.values.clear({
           spreadsheetId: sheetId,
-          range: `'${tabName}'!B5:Z1000`,
+          range: `'${tabName}'!B5:${endColLetter}1000`,
         });
       } catch (e) {}
 
@@ -1021,9 +1021,399 @@ export async function syncCategorizedWithMasterRoster(
         headers.length
       );
 
+      // Sinkronkan 2 Tabel Samping di Kolom L s/d P:
+      // Tabel 1 (Atas): Sudah Absen (Urut waktu presensi paling cepat / check_in_time ASC)
+      // Tabel 2 (Bawah): Belum Absen
+      try {
+        await syncSideTables(
+          sheetId,
+          tabName,
+          sheetNumericId,
+          items,
+          attendances,
+          date
+        );
+      } catch (sideErr: any) {
+        console.error(`Error syncing side tables for ${tabName}:`, sideErr?.message || sideErr);
+      }
+
       return { tabName, count: rows.length };
     })
   );
 
   return results;
+}
+
+/**
+ * Renders the two live side-tables starting at Column L4:
+ * Table 1 (Top): Mahasiswa / Dosen SUDAH ABSEN (Urut waktu kehadiran tercepat / check_in_time ASC)
+ * Table 2 (Bottom): Mahasiswa / Dosen BELUM ABSEN (Urut NIM ASC)
+ */
+export async function syncSideTables(
+  sheetId: string,
+  tabName: string,
+  sheetNumericId: number,
+  items: any[],
+  attendances: any[],
+  targetDate: string
+) {
+  const auth = getAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  // 1. Map attendances on targetDate for fast lookup
+  const attByNim = new Map<string, any>();
+  for (const att of attendances) {
+    const aDate = att.attendance_date || targetDate;
+    if (aDate === targetDate) {
+      if (att.nim) attByNim.set(String(att.nim).trim().toUpperCase(), att);
+      if (att.name) attByNim.set(String(att.name).trim().toUpperCase(), att);
+    }
+  }
+
+  // 2. Separate into Present and Absent
+  const presentList: {
+    item: any;
+    att: any;
+    time: string;
+    rawTime: string;
+  }[] = [];
+  const absentList: any[] = [];
+
+  for (const item of items) {
+    const nimKey = String(item.nim || '').trim().toUpperCase();
+    const nameKey = String(item.name || '').trim().toUpperCase();
+    const att = attByNim.get(nimKey) || attByNim.get(nameKey);
+
+    if (att) {
+      const rawTime = att.check_in_time || '00:00:00';
+      presentList.push({
+        item,
+        att,
+        time: rawTime.slice(0, 8),
+        rawTime,
+      });
+    } else {
+      absentList.push(item);
+    }
+  }
+
+  // 3. Sort Present by check_in_time ASC (yang paling pertama absen di paling atas!)
+  presentList.sort((a, b) => a.rawTime.localeCompare(b.rawTime));
+  // Sort Absent by NIM or Name
+  absentList.sort((a, b) => String(a.nim || a.name).localeCompare(String(b.nim || b.name)));
+
+  // 4. Data for Table 1 (Sudah Absen)
+  const isDosenTab = tabName.toLowerCase().includes('dosen');
+  const roleLabel = isDosenTab ? 'Dosen' : 'Mahasiswa';
+
+  const t1Header = ['No', 'Jam Masuk', isDosenTab ? 'NIM / NIP' : 'NIM', 'Nama Lengkap', 'Status'];
+  const t1DataRows =
+    presentList.length > 0
+      ? presentList.map((p, idx) => [
+          idx + 1,
+          `${p.time} WIB`,
+          p.item.nim || '-',
+          p.item.name || '-',
+          p.att.status || 'Hadir',
+        ])
+      : [['-', '-', '-', `Belum ada ${roleLabel.toLowerCase()} yang presensi`, '-']];
+
+  // 5. Data for Table 2 (Belum Absen)
+  const t1EndRow = 4 + t1DataRows.length; // Header at row 4, data rows start row 5
+  const t2TitleRow = t1EndRow + 3; // 2 spacing rows
+  const t2SubtitleRow = t2TitleRow + 1;
+  const t2HeaderRow = t2SubtitleRow + 1;
+
+  const t2Header = ['No', 'Waktu', isDosenTab ? 'NIM / NIP' : 'NIM', 'Nama Lengkap', 'Status'];
+  const t2DataRows =
+    absentList.length > 0
+      ? absentList.map((s, idx) => [
+          idx + 1,
+          '-',
+          s.nim || '-',
+          s.name || '-',
+          'Belum Hadir',
+        ])
+      : [['-', '-', '-', `Semua ${roleLabel.toLowerCase()} sudah presensi! 🎉`, 'Lengkap']];
+
+  // 6. Clear old side tables range (L2:P500)
+  try {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: sheetId,
+      range: `'${tabName}'!L2:P500`,
+    });
+  } catch (e) {}
+
+  // 7. Write Table 1 Values (L2:P...)
+  const t1Values = [
+    [`DAFTAR SUDAH PRESENSI (${presentList.length} ${roleLabel.toUpperCase()})`, '', '', '', ''],
+    [`Urut berdasarkan waktu kehadiran tercepat • Sesi ${targetDate}`, '', '', '', ''],
+    t1Header,
+    ...t1DataRows,
+  ];
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `'${tabName}'!L2:P${4 + t1DataRows.length}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: t1Values },
+  });
+
+  // Write Table 2 Values (L${t2TitleRow}:P...)
+  const t2Values = [
+    [`DAFTAR BELUM PRESENSI (${absentList.length} ${roleLabel.toUpperCase()})`, '', '', '', ''],
+    [`${roleLabel} yang belum melakukan presensi pada hari ini`, '', '', '', ''],
+    t2Header,
+    ...t2DataRows,
+  ];
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `'${tabName}'!L${t2TitleRow}:P${t2HeaderRow + t2DataRows.length}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: t2Values },
+  });
+
+  // 8. Formatting Styling Requests
+  const requests: any[] = [
+    // Column Widths
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 10, endIndex: 11 }, // K (spacer)
+        properties: { pixelSize: 30 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 11, endIndex: 12 }, // L (No)
+        properties: { pixelSize: 45 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 12, endIndex: 13 }, // M (Jam)
+        properties: { pixelSize: 110 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 13, endIndex: 14 }, // N (NIM)
+        properties: { pixelSize: 110 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 14, endIndex: 15 }, // O (Nama)
+        properties: { pixelSize: 240 },
+        fields: 'pixelSize',
+      },
+    },
+    {
+      updateDimensionProperties: {
+        range: { sheetId: sheetNumericId, dimension: 'COLUMNS', startIndex: 15, endIndex: 16 }, // P (Status)
+        properties: { pixelSize: 105 },
+        fields: 'pixelSize',
+      },
+    },
+
+    // Unmerge potential previous merges
+    {
+      unmergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: 1, endRowIndex: 3, startColumnIndex: 11, endColumnIndex: 16 },
+      },
+    },
+    {
+      unmergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2TitleRow - 1, endRowIndex: t2HeaderRow - 1, startColumnIndex: 11, endColumnIndex: 16 },
+      },
+    },
+
+    // Merge Table 1 Title & Subtitle
+    {
+      mergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 11, endColumnIndex: 16 },
+        mergeType: 'MERGE_ALL',
+      },
+    },
+    {
+      mergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 11, endColumnIndex: 16 },
+        mergeType: 'MERGE_ALL',
+      },
+    },
+
+    // Table 1 Title Style (Emerald #0A7459)
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.04, green: 0.45, blue: 0.35 },
+            textFormat: { bold: true, fontSize: 11, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 1 Subtitle Style
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.92, green: 0.98, blue: 0.95 },
+            textFormat: { italic: true, fontSize: 9, foregroundColor: { red: 0.02, green: 0.38, blue: 0.28 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 1 Header Style (Emerald #059669)
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.02, green: 0.59, blue: 0.41 },
+            textFormat: { bold: true, fontSize: 10, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 1 Data Columns: Alignment
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 4, endRowIndex: 4 + t1DataRows.length, startColumnIndex: 11, endColumnIndex: 14 },
+        cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE' } },
+        fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment)',
+      },
+    },
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 4, endRowIndex: 4 + t1DataRows.length, startColumnIndex: 14, endColumnIndex: 15 },
+        cell: { userEnteredFormat: { horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE', textFormat: { bold: true } } },
+        fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat.bold)',
+      },
+    },
+    // Table 1 Status Column: Light Green Background
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: 4, endRowIndex: 4 + t1DataRows.length, startColumnIndex: 15, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.86, green: 0.98, blue: 0.9 },
+            textFormat: { bold: true, foregroundColor: { red: 0.09, green: 0.4, blue: 0.2 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+
+    // Merge Table 2 Title & Subtitle
+    {
+      mergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2TitleRow - 1, endRowIndex: t2TitleRow, startColumnIndex: 11, endColumnIndex: 16 },
+        mergeType: 'MERGE_ALL',
+      },
+    },
+    {
+      mergeCells: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2SubtitleRow - 1, endRowIndex: t2SubtitleRow, startColumnIndex: 11, endColumnIndex: 16 },
+        mergeType: 'MERGE_ALL',
+      },
+    },
+    // Table 2 Title Style (Dark Slate #334155)
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2TitleRow - 1, endRowIndex: t2TitleRow, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.2, green: 0.25, blue: 0.33 },
+            textFormat: { bold: true, fontSize: 11, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 2 Subtitle Style
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2SubtitleRow - 1, endRowIndex: t2SubtitleRow, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.95, green: 0.96, blue: 0.98 },
+            textFormat: { italic: true, fontSize: 9, foregroundColor: { red: 0.3, green: 0.35, blue: 0.45 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 2 Header Style (Slate #475569)
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2HeaderRow - 1, endRowIndex: t2HeaderRow, startColumnIndex: 11, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.28, green: 0.33, blue: 0.41 },
+            textFormat: { bold: true, fontSize: 10, foregroundColor: { red: 1, green: 1, blue: 1 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+    // Table 2 Data Columns: Alignment
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2HeaderRow, endRowIndex: t2HeaderRow + t2DataRows.length, startColumnIndex: 11, endColumnIndex: 14 },
+        cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE' } },
+        fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment)',
+      },
+    },
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2HeaderRow, endRowIndex: t2HeaderRow + t2DataRows.length, startColumnIndex: 14, endColumnIndex: 15 },
+        cell: { userEnteredFormat: { horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE', textFormat: { bold: true } } },
+        fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat.bold)',
+      },
+    },
+    // Table 2 Status Column: Soft Red Background
+    {
+      repeatCell: {
+        range: { sheetId: sheetNumericId, startRowIndex: t2HeaderRow, endRowIndex: t2HeaderRow + t2DataRows.length, startColumnIndex: 15, endColumnIndex: 16 },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.99, green: 0.89, blue: 0.89 },
+            textFormat: { bold: true, foregroundColor: { red: 0.6, green: 0.11, blue: 0.11 } },
+            horizontalAlignment: 'CENTER',
+            verticalAlignment: 'MIDDLE',
+          },
+        },
+        fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+      },
+    },
+  ];
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId,
+    requestBody: { requests },
+  });
 }
