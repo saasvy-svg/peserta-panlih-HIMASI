@@ -41,17 +41,9 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
   // ===============================
   // STATE DOSEN
   // ===============================
-  const [selectedLecturer, setSelectedLecturer] = useState<string>(
-    lecturers.length > 0 ? lecturers[0] : ''
-  );
+  const [selectedLecturer, setSelectedLecturer] = useState<string>('');
   const [lecturerNip, setLecturerNip] = useState('');
   const [lecturerRole, setLecturerRole] = useState('Dosen');
-
-  useEffect(() => {
-    if (lecturers.length > 0 && !selectedLecturer) {
-      setSelectedLecturer(lecturers[0]);
-    }
-  }, [lecturers]);
 
   // Status & Submit
   const [status, setStatus] = useState<'Hadir' | 'Izin' | 'Sakit'>('Hadir');
@@ -270,6 +262,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
     setSearchError(null);
     setAlreadyCheckedIn(null);
     setSubmitError(null);
+    setSelectedLecturer('');
     setLecturerNip('');
     setNotes('');
     setStatus('Hadir');
@@ -608,10 +601,15 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
                   value={selectedLecturer}
                   onChange={(e) => setSelectedLecturer(e.target.value)}
                   required
-                  className="w-full bg-[#F8F9FA] focus:bg-white border border-gray-200 focus:border-[#2563EB] rounded-xl pl-10 pr-10 py-3 text-sm font-bold text-[#111827] outline-hidden transition-all appearance-none cursor-pointer"
+                  className={`w-full bg-[#F8F9FA] focus:bg-white border border-gray-200 focus:border-[#2563EB] rounded-xl pl-10 pr-10 py-3 text-sm outline-hidden transition-all appearance-none cursor-pointer ${
+                    !selectedLecturer ? 'text-gray-400 font-normal' : 'text-[#111827] font-bold'
+                  }`}
                 >
+                  <option value="" disabled className="text-gray-400 font-normal">
+                    -- Klik untuk pilih nama dosen --
+                  </option>
                   {lecturers.map((doc, idx) => (
-                    <option key={idx} value={doc}>
+                    <option key={idx} value={doc} className="text-[#111827] font-semibold py-1">
                       {doc}
                     </option>
                   ))}
