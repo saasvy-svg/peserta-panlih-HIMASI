@@ -25,7 +25,8 @@ import {
   Info,
   Lock,
   ArrowRight,
-  Sparkles
+  Sparkles,
+  X
 } from 'lucide-react';
 import { formatDate } from '@/lib/utils';
 import { createClient } from '@/utils/supabase/client';
@@ -47,6 +48,10 @@ interface VotingCandidate {
   id: string;
   number: string;
   name: string;
+  ketua?: string | null;
+  wakil_ketua?: string | null;
+  visi?: string | null;
+  misi?: string[] | string | null;
   tagline?: string;
   photo_url?: string | null;
   is_golput?: boolean;
@@ -116,6 +121,7 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
   });
   const [selectedCandidate, setSelectedCandidate] = useState<VotingCandidate | null>(null);
   const [confirmVoteModal, setConfirmVoteModal] = useState(false);
+  const [viewVisiMisi, setViewVisiMisi] = useState<VotingCandidate | null>(null);
   const [isSubmittingVote, setIsSubmittingVote] = useState(false);
   const [voteReceipt, setVoteReceipt] = useState<{
     voted_at: string;
@@ -636,14 +642,49 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
                           </span>
                         </div>
 
+                        {/* Foto Paslon */}
+                        {cand.photo_url && (
+                          <div className="w-full h-44 rounded-xl overflow-hidden bg-gray-100 mb-3 border border-black/5 relative shadow-2xs">
+                            <img
+                              src={cand.photo_url}
+                              alt={cand.name}
+                              className="w-full h-full object-cover object-top hover:scale-105 transition-all duration-300"
+                            />
+                          </div>
+                        )}
+
                         {/* Candidate Name & Tagline */}
                         <h4 className="font-bold text-sm text-[#111827] line-clamp-2">
                           {cand.name}
                         </h4>
+
+                        {/* Calon Ketua & Wakil Ketua */}
+                        {cand.ketua && cand.wakil_ketua && (
+                          <div className="mt-2 text-[11px] bg-slate-50 p-2 rounded-xl border border-slate-200/80 space-y-0.5">
+                            <div><span className="font-semibold text-gray-500">Ketua:</span> <span className="font-bold text-gray-800">{cand.ketua}</span></div>
+                            <div><span className="font-semibold text-gray-500">Wakil:</span> <span className="font-bold text-gray-800">{cand.wakil_ketua}</span></div>
+                          </div>
+                        )}
+
                         {cand.tagline && (
-                          <p className="text-xs text-[#6B7280] mt-1 italic">
+                          <p className="text-xs text-[#6B7280] mt-1.5 italic">
                             &quot;{cand.tagline}&quot;
                           </p>
+                        )}
+
+                        {/* Tombol Lihat Visi & Misi */}
+                        {(cand.visi || cand.misi) && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewVisiMisi(cand);
+                            }}
+                            className="mt-2.5 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
+                          >
+                            <BookOpen size={13} />
+                            <span>Lihat Visi & Misi Paslon</span>
+                          </button>
                         )}
                       </div>
 
@@ -1316,6 +1357,110 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
             )}
           </button>
         </form>
+      )}
+
+      {/* ========================================================
+          MODAL LIHAT VISI & MISI PASLON
+          ======================================================== */}
+      {viewVisiMisi && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between border-b border-black/5 pb-3">
+              <div className="flex items-center gap-2.5">
+                <span className="w-10 h-10 rounded-xl bg-[#2563EB] text-white font-mono font-black text-base flex items-center justify-center shadow-xs">
+                  {viewVisiMisi.number}
+                </span>
+                <div>
+                  <h3 className="font-bold text-base text-[#111827]">
+                    Visi & Misi Paslon {viewVisiMisi.number}
+                  </h3>
+                  <p className="text-xs text-gray-500 font-medium line-clamp-1">
+                    {viewVisiMisi.name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewVisiMisi(null)}
+                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-all cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {viewVisiMisi.photo_url && (
+              <div className="w-full h-48 rounded-xl overflow-hidden bg-gray-100 border border-black/5 shadow-2xs">
+                <img
+                  src={viewVisiMisi.photo_url}
+                  alt={viewVisiMisi.name}
+                  className="w-full h-full object-cover object-top"
+                />
+              </div>
+            )}
+
+            {viewVisiMisi.ketua && viewVisiMisi.wakil_ketua && (
+              <div className="grid grid-cols-2 gap-2 text-xs bg-blue-50/60 border border-blue-200/80 p-3 rounded-xl">
+                <div>
+                  <span className="text-gray-500 block text-[10px] uppercase font-bold">Calon Ketua</span>
+                  <span className="font-bold text-blue-900">{viewVisiMisi.ketua}</span>
+                </div>
+                <div>
+                  <span className="text-gray-500 block text-[10px] uppercase font-bold">Calon Wakil Ketua</span>
+                  <span className="font-bold text-blue-900">{viewVisiMisi.wakil_ketua}</span>
+                </div>
+              </div>
+            )}
+
+            {/* VISI */}
+            {viewVisiMisi.visi && (
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-black uppercase tracking-wider text-blue-600 flex items-center gap-1.5">
+                  <Sparkles size={14} />
+                  <span>Visi</span>
+                </h4>
+                <p className="text-xs text-gray-700 leading-relaxed bg-gray-50 p-3 rounded-xl border border-gray-200">
+                  {viewVisiMisi.visi}
+                </p>
+              </div>
+            )}
+
+            {/* MISI */}
+            {viewVisiMisi.misi && (
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-black uppercase tracking-wider text-blue-600 flex items-center gap-1.5">
+                  <CheckCheck size={14} />
+                  <span>Misi</span>
+                </h4>
+                <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 text-xs text-gray-700 space-y-2">
+                  {Array.isArray(viewVisiMisi.misi) ? (
+                    viewVisiMisi.misi.map((m: string, idx: number) => (
+                      <div key={idx} className="flex items-start gap-2">
+                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                          {idx + 1}
+                        </span>
+                        <span className="leading-relaxed">{m}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="leading-relaxed">{viewVisiMisi.misi}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedCandidate(viewVisiMisi);
+                setViewVisiMisi(null);
+              }}
+              className="w-full py-2.5 px-4 bg-[#2563EB] hover:bg-[#1D4ED8] text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Check size={15} />
+              <span>Pilih Paslon Ini untuk Dicoblos</span>
+            </button>
+          </div>
+        </div>
       )}
 
       {/* ========================================================

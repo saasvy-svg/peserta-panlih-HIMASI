@@ -53,6 +53,10 @@ export interface QuickCountCandidate {
   id: string;
   number: string;
   name: string;
+  ketua?: string;
+  wakil_ketua?: string;
+  visi?: string;
+  misi?: string[] | string;
   tagline?: string;
   photo_url?: string;
   votes: number;

@@ -48,6 +48,10 @@ export async function GET(request: NextRequest) {
       id: c.id,
       number: c.number,
       name: c.name,
+      ketua: c.ketua || null,
+      wakil_ketua: c.wakil_ketua || null,
+      visi: c.visi || null,
+      misi: c.misi || null,
       tagline: c.tagline || '',
       photo_url: c.photo_url || null,
     }));
