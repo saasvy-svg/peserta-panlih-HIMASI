@@ -73,6 +73,8 @@ export default function HeroBannerSlider({
           <img
             src={imgUrl}
             alt={`Banner #${idx + 1}`}
+            loading={idx === 0 ? 'eager' : 'lazy'}
+            decoding="async"
             className="w-full h-full object-cover brightness-[0.78]"
           />
           {/* Overlay Teks Dinamis di atas Foto */}

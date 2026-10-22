@@ -644,11 +644,11 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
 
                         {/* Foto Paslon */}
                         {cand.photo_url && (
-                          <div className="w-full h-44 rounded-xl overflow-hidden bg-gray-100 mb-3 border border-black/5 relative shadow-2xs">
+                          <div className="w-full h-52 sm:h-56 rounded-xl overflow-hidden bg-slate-900/5 mb-3 border border-black/5 relative shadow-2xs flex items-center justify-center">
                             <img
                               src={cand.photo_url}
                               alt={cand.name}
-                              className="w-full h-full object-cover object-top hover:scale-105 transition-all duration-300"
+                              className="w-full h-full object-contain hover:scale-105 transition-all duration-300"
                             />
                           </div>
                         )}
@@ -1389,11 +1389,11 @@ export default function AttendanceForm({ lecturers = [] }: AttendanceFormProps) 
             </div>
 
             {viewVisiMisi.photo_url && (
-              <div className="w-full h-48 rounded-xl overflow-hidden bg-gray-100 border border-black/5 shadow-2xs">
+              <div className="w-full max-h-80 sm:max-h-96 rounded-2xl overflow-hidden bg-slate-900/5 border border-black/5 flex items-center justify-center p-1 shadow-inner">
                 <img
                   src={viewVisiMisi.photo_url}
                   alt={viewVisiMisi.name}
-                  className="w-full h-full object-cover object-top"
+                  className="w-auto h-auto max-h-80 sm:max-h-96 max-w-full object-contain mx-auto rounded-xl"
                 />
               </div>
             )}
