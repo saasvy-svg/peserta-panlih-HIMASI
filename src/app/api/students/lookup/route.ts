@@ -6,6 +6,9 @@ import { resolveActiveDay } from '@/lib/dayHelper';
 import { checkAttendanceTimeLock } from '@/lib/timeLock';
 import { getMemberAttendanceType, hasStudentVotedOnline } from '@/lib/onlineVoting';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const rawNim = searchParams.get('nim');
@@ -29,26 +32,32 @@ export async function GET(request: NextRequest) {
       day1Date: dayResolution.day1Date,
       day2Date: dayResolution.day2Date,
       timeLock,
+    }, {
+      headers: {
+        'Cache-Control': 'no-store, no-cache',
+      },
     });
   }
 
   const nim = rawNim.trim();
 
   try {
-    // 1. Cari mahasiswa berdasarkan NIM (case-insensitive)
-    let student: any = null;
-    let studentError: any = null;
+    // 1. Ambil data mahasiswa dan landing_settings secara paralel
+    const [studentRes, landingRes] = await Promise.all([
+      supabase
+        .from('students')
+        .select('id, nim, name, class_name, is_active, attendance_type')
+        .ilike('nim', nim)
+        .eq('is_active', true)
+        .maybeSingle(),
+      supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle(),
+    ]);
 
-    // Coba select dengan kolom attendance_type
-    const resWithCol = await supabase
-      .from('students')
-      .select('id, nim, name, class_name, is_active, attendance_type')
-      .ilike('nim', nim)
-      .eq('is_active', true)
-      .maybeSingle();
-
-    if (resWithCol.error && resWithCol.error.message.includes('attendance_type')) {
-      // Fallback jika kolom attendance_type belum ditambahkan di DB
+    let student: any = studentRes.data;
+    if (studentRes.error && studentRes.error.message.includes('attendance_type')) {
       const resFallback = await supabase
         .from('students')
         .select('id, nim, name, class_name, is_active')
@@ -56,44 +65,31 @@ export async function GET(request: NextRequest) {
         .eq('is_active', true)
         .maybeSingle();
       student = resFallback.data;
-      studentError = resFallback.error;
-    } else {
-      student = resWithCol.data;
-      studentError = resWithCol.error;
     }
 
-    if (studentError || !student) {
+    if (!student) {
       return NextResponse.json({
         error: 'NIM tidak terdaftar di sistem perkuliahan.',
         student: null,
       }, { status: 404 });
     }
 
-    // Ambil setting sesi aktif (Hari 1 atau Hari 2)
-    let extraTexts: any = null;
-    try {
-      const { data: landingData } = await supabase
-        .from('landing_settings')
-        .select('extra_texts')
-        .maybeSingle();
-      extraTexts = landingData?.extra_texts || null;
-    } catch (e) {}
-
+    const extraTexts = landingRes.data?.extra_texts || null;
     const dayResolution = resolveActiveDay(extraTexts);
     const activeDay = dayResolution.activeDay;
     const targetDate = dayResolution.effectiveDate;
 
-    // 2. Cek apakah sudah absen pada sesi hari ini
-    const { data: attendance } = await supabase
-      .from('attendances')
-      .select('id, check_in_time, status')
-      .eq('nim', student.nim)
-      .eq('attendance_date', targetDate)
-      .maybeSingle();
-
-    // 3. Tentukan tipe kehadiran (online vs offline) & status mencoblos online
-    const attendanceType = await getMemberAttendanceType(student.nim, student);
-    const hasVotedOnline = await hasStudentVotedOnline(student.nim);
+    // 2. Ambil absensi hari ini, attendanceType, dan status vote online secara paralel
+    const [attendanceRes, attendanceType, hasVotedOnline] = await Promise.all([
+      supabase
+        .from('attendances')
+        .select('id, check_in_time, status')
+        .eq('nim', student.nim)
+        .eq('attendance_date', targetDate)
+        .maybeSingle(),
+      getMemberAttendanceType(student.nim, student, extraTexts),
+      hasStudentVotedOnline(student.nim, extraTexts),
+    ]);
 
     return NextResponse.json({
       student: {
@@ -107,7 +103,11 @@ export async function GET(request: NextRequest) {
       activeDay,
       attendanceDate: targetDate,
       timeLock: checkAttendanceTimeLock(extraTexts),
-      existingAttendance: attendance || null,
+      existingAttendance: attendanceRes.data || null,
+    }, {
+      headers: {
+        'Cache-Control': 'no-store, no-cache',
+      },
     });
   } catch (err: any) {
     return NextResponse.json({ error: 'Gagal mencari data mahasiswa' }, { status: 500 });

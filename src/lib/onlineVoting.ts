@@ -24,25 +24,16 @@ export interface OnlineVotingStats {
  */
 export async function getMemberAttendanceType(
   nim: string,
-  studentFromDb?: { attendance_type?: string | null } | null
+  studentFromDb?: { attendance_type?: string | null } | null,
+  providedExtraTexts?: any
 ): Promise<'online' | 'offline'> {
   if (!nim) return 'offline';
   const cleanNim = String(nim).trim().toUpperCase();
 
-  const supabase = createAdminClient();
-
-  // 1. Prioritaskan setting eksplisit dari extra_texts.online_members (tempat Admin toggle realtime)
-  try {
-    const { data: landingData } = await supabase
-      .from('landing_settings')
-      .select('extra_texts')
-      .maybeSingle();
-
-    const onlineMembers: Record<string, 'online' | 'offline'> = landingData?.extra_texts?.online_members || {};
-    if (onlineMembers[cleanNim]) {
-      return onlineMembers[cleanNim] === 'online' ? 'online' : 'offline';
-    }
-  } catch (e) {}
+  // 1. Cek dari providedExtraTexts (jika sudah di-fetch oleh pemanggil secara paralel)
+  if (providedExtraTexts?.online_members && providedExtraTexts.online_members[cleanNim]) {
+    return providedExtraTexts.online_members[cleanNim] === 'online' ? 'online' : 'offline';
+  }
 
   // 2. Cek dari kolom attendance_type jika disediakan
   if (studentFromDb?.attendance_type) {
@@ -53,7 +44,24 @@ export async function getMemberAttendanceType(
     return 'offline';
   }
 
-  // 3. Fallback query langsung ke tabel students di database
+  const supabase = createAdminClient();
+
+  // 3. Prioritaskan setting eksplisit dari extra_texts.online_members (tempat Admin toggle realtime)
+  if (!providedExtraTexts) {
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
+
+      const onlineMembers: Record<string, 'online' | 'offline'> = landingData?.extra_texts?.online_members || {};
+      if (onlineMembers[cleanNim]) {
+        return onlineMembers[cleanNim] === 'online' ? 'online' : 'offline';
+      }
+    } catch (e) {}
+  }
+
+  // 4. Fallback query langsung ke tabel students di database
   try {
     const { data: s } = await supabase
       .from('students')
@@ -75,11 +83,23 @@ export async function getMemberAttendanceType(
 /**
  * Memeriksa apakah NIM sudah mencoblos secara online
  */
-export async function hasStudentVotedOnline(nim: string): Promise<boolean> {
+export async function hasStudentVotedOnline(nim: string, providedExtraTexts?: any): Promise<boolean> {
   const cleanNim = String(nim).trim().toUpperCase();
+
+  // 1. Cek cepat di providedExtraTexts jika sudah di-cache oleh pemanggil
+  if (providedExtraTexts) {
+    if (providedExtraTexts.voting_records && providedExtraTexts.voting_records[cleanNim]?.has_voted) {
+      return true;
+    }
+    const fallbackVotes: OnlineVote[] = providedExtraTexts.online_votes_fallback || [];
+    if (fallbackVotes.some((v) => String(v.nim).trim().toUpperCase() === cleanNim)) {
+      return true;
+    }
+  }
+
   const supabase = createAdminClient();
 
-  // 1. Cek tabel online_votes jika ada
+  // 2. Cek tabel online_votes jika ada
   try {
     const { data, error } = await supabase
       .from('online_votes')
@@ -92,26 +112,26 @@ export async function hasStudentVotedOnline(nim: string): Promise<boolean> {
     }
   } catch (e) {}
 
-  // 2. Cek fallback di extra_texts
-  try {
-    const { data: landingData } = await supabase
-      .from('landing_settings')
-      .select('extra_texts')
-      .maybeSingle();
+  // 3. Cek fallback di extra_texts jika belum dicek
+  if (!providedExtraTexts) {
+    try {
+      const { data: landingData } = await supabase
+        .from('landing_settings')
+        .select('extra_texts')
+        .maybeSingle();
 
-    const extraTexts = landingData?.extra_texts || {};
-    // Cek voting_records
-    const votingRecords = extraTexts.voting_records || {};
-    if (votingRecords[cleanNim]?.has_voted) {
-      return true;
-    }
+      const extraTexts = landingData?.extra_texts || {};
+      const votingRecords = extraTexts.voting_records || {};
+      if (votingRecords[cleanNim]?.has_voted) {
+        return true;
+      }
 
-    // Cek online_votes_fallback
-    const fallbackVotes: OnlineVote[] = extraTexts.online_votes_fallback || [];
-    if (fallbackVotes.some((v) => String(v.nim).trim().toUpperCase() === cleanNim)) {
-      return true;
-    }
-  } catch (e) {}
+      const fallbackVotes: OnlineVote[] = extraTexts.online_votes_fallback || [];
+      if (fallbackVotes.some((v) => String(v.nim).trim().toUpperCase() === cleanNim)) {
+        return true;
+      }
+    } catch (e) {}
+  }
 
   return false;
 }
