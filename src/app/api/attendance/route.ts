@@ -5,6 +5,7 @@ import { normalizeAngkatan, getTargetTabName } from '@/utils/angkatan';
 import { getWIBDate, getWIBTime } from '@/lib/utils';
 import { resolveActiveDay } from '@/lib/dayHelper';
 import { checkAttendanceTimeLock } from '@/lib/timeLock';
+import { getMemberAttendanceType, hasStudentVotedOnline } from '@/lib/onlineVoting';
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for');
@@ -206,6 +207,10 @@ export async function POST(request: NextRequest) {
       console.error('Google Sheets check error:', sheetErr.message);
     }
 
+    // Re-check member attendance type and online voting status fresh from DB/settings
+    const attendanceType = await getMemberAttendanceType(nim);
+    const hasVotedOnline = await hasStudentVotedOnline(nim);
+
     return NextResponse.json({
       success: true,
       activeDay,
@@ -213,6 +218,8 @@ export async function POST(request: NextRequest) {
         ? `Presensi ${name} (Hari ke-${activeDay}) berhasil dicatat oleh Admin!`
         : `Presensi Hari ke-${activeDay} berhasil dicatat!`,
       data: newRecord,
+      attendance_type: attendanceType,
+      has_voted_online: hasVotedOnline,
     });
   } catch (error: any) {
     console.error('API Attendance Error:', error);

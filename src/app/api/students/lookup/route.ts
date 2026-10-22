@@ -4,10 +4,12 @@ import { normalizeAngkatan } from '@/utils/angkatan';
 import { getWIBDate } from '@/lib/utils';
 import { resolveActiveDay } from '@/lib/dayHelper';
 import { checkAttendanceTimeLock } from '@/lib/timeLock';
+import { getMemberAttendanceType, hasStudentVotedOnline } from '@/lib/onlineVoting';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const rawNim = searchParams.get('nim');
+  const supabase = createAdminClient();
 
   if (!rawNim) {
     // Return active day info if no NIM provided
@@ -31,16 +33,34 @@ export async function GET(request: NextRequest) {
   }
 
   const nim = rawNim.trim();
-  const supabase = createAdminClient();
 
   try {
     // 1. Cari mahasiswa berdasarkan NIM (case-insensitive)
-    const { data: student, error: studentError } = await supabase
+    let student: any = null;
+    let studentError: any = null;
+
+    // Coba select dengan kolom attendance_type
+    const resWithCol = await supabase
       .from('students')
-      .select('id, nim, name, class_name, is_active')
+      .select('id, nim, name, class_name, is_active, attendance_type')
       .ilike('nim', nim)
       .eq('is_active', true)
-      .single();
+      .maybeSingle();
+
+    if (resWithCol.error && resWithCol.error.message.includes('attendance_type')) {
+      // Fallback jika kolom attendance_type belum ditambahkan di DB
+      const resFallback = await supabase
+        .from('students')
+        .select('id, nim, name, class_name, is_active')
+        .ilike('nim', nim)
+        .eq('is_active', true)
+        .maybeSingle();
+      student = resFallback.data;
+      studentError = resFallback.error;
+    } else {
+      student = resWithCol.data;
+      studentError = resWithCol.error;
+    }
 
     if (studentError || !student) {
       return NextResponse.json({
@@ -71,12 +91,18 @@ export async function GET(request: NextRequest) {
       .eq('attendance_date', targetDate)
       .maybeSingle();
 
+    // 3. Tentukan tipe kehadiran (online vs offline) & status mencoblos online
+    const attendanceType = await getMemberAttendanceType(student.nim, student);
+    const hasVotedOnline = await hasStudentVotedOnline(student.nim);
+
     return NextResponse.json({
       student: {
         id: student.id,
         nim: student.nim,
         name: student.name,
         class_name: normalizeAngkatan(student.class_name),
+        attendance_type: attendanceType, // 'online' | 'offline'
+        has_voted_online: hasVotedOnline,
       },
       activeDay,
       attendanceDate: targetDate,

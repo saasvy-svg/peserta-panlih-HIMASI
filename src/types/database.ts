@@ -4,7 +4,21 @@ export interface Student {
   name: string;
   class_name: string;
   phone?: string | null;
+  attendance_type?: 'online' | 'offline';
   is_active: boolean;
+  created_at: string;
+}
+
+export interface OnlineVote {
+  id: string;
+  nim: string;
+  name?: string;
+  class_name?: string;
+  voter_role?: 'mahasiswa' | 'dosen';
+  choice_id: string;
+  choice_number: string;
+  choice_name: string;
+  is_golput: boolean;
   created_at: string;
 }
 
@@ -67,6 +81,9 @@ export interface ExtraTexts {
   close_time?: string;
   time_lock_message?: string;
   voting_records?: Record<string, VotingRecord>;
+  online_members?: Record<string, 'online' | 'offline'>;
+  online_votes_fallback?: OnlineVote[];
+  online_votes_merged?: boolean;
   quick_count?: QuickCountConfig;
   card1_title?: string;
   card1_desc?: string;
